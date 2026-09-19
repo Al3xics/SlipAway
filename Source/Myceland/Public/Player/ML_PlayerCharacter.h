@@ -38,6 +38,26 @@ private:
 	
 	void HandleTileStateChange(const AML_Tile* OldTile, const AML_Tile* NewTile) const;
 
+	// ---- On-load win replay ----
+	// On load, for every board the save marks solved we teleport the player onto it, fire its OnWin,
+	// wait a couple frames, then move to the next — ending on the latest-solved board. Teleporting
+	// first means each board's win effects run with the player actually standing on it.
+	TArray<TWeakObjectPtr<AML_BoardSpawner>> OnLoadReplayQueue;
+	int32 OnLoadReplayFramesLeft = 0;
+	bool bHasStartedOnLoadReplay = false;
+
+	// Teleports onto the next queued board, fires its OnWin, then waits a couple frames and repeats.
+	void ProcessNextOnLoadBoard();
+
+	// Frame-gap countdown between boards (chained next-tick timers); calls ProcessNextOnLoadBoard at 0.
+	void TickOnLoadReplayGap();
+
+	// Teleports the player onto a walkable tile of Board and syncs CurrentTileOn. False if none walkable.
+	bool TeleportToBoard(AML_BoardSpawner* Board);
+
+	// First walkable exit tile (across BoardExits), else first walkable water-path tile, else nullptr.
+	const AML_Tile* FindWalkableSpawnTile(const AML_BoardSpawner* Board) const;
+
 public:
 	virtual void BeginPlay() override;
 	

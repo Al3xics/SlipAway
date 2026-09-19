@@ -112,6 +112,10 @@ void AML_PlayerCharacter::BeginPlay()
 
 void AML_PlayerCharacter::ApplySavedSpawnPosition()
 {
+	// Run the on-load replay at most once — this can be invoked more than once on load (e.g. pawn
+	// re-possession), and a second run would restart the sequence mid-flight.
+	if (bHasStartedOnLoadReplay) return;
+
 	const UGameInstance* GI = GetGameInstance();
 	if (!GI) return;
 
@@ -124,102 +128,128 @@ void AML_PlayerCharacter::ApplySavedSpawnPosition()
 	UWorld* World = GetWorld();
 	if (!World) return;
 
-	// ---- Step 1: teleport onto the last solved board's first exit tile and sync CurrentTileOn ----
-	// Also records SpawnBoard (the board we land on): in Step 2 that board replays OnWin, while every
-	// other solved board just revives its nature zones. Stays null if no walkable spawn tile exists.
-	AML_BoardSpawner* SpawnBoard = nullptr;
-	for (TActorIterator<AML_BoardSpawner> It(World); It; ++It)
-	{
-		AML_BoardSpawner* Board = *It;
-		if (!IsValid(Board)) continue;
-		if (Board->PuzzleID.GetTagName() != LastPuzzle) continue;
-
-		// Pick the spawn tile with a walkability fallback chain, since a solved board can leave its
-		// authored first exit tile non-walkable (blocked / flooded), and standing the player there
-		// would trap them:
-		//   1. the first walkable ExitTile across all BoardExits (in order),
-		//   2. failing that, the first walkable water-path tile (Exit then Entry, in order).
-		const AML_Tile* SpawnTile = nullptr;
-
-		for (const FML_BoardExit& Exit : Board->BoardExits)
-		{
-			for (const TObjectPtr<AML_Tile>& ExitTile : Exit.ExitTiles)
-			{
-				if (UML_HexPathfinder::IsTileWalkable(ExitTile.Get()))
-				{
-					SpawnTile = ExitTile.Get();
-					break;
-				}
-			}
-			if (SpawnTile) break;
-		}
-
-		// Final fallback: no walkable exit tile — try the water-path tiles.
-		if (!SpawnTile)
-		{
-			for (const FML_WaterPath& WaterPath : Board->WaterPaths)
-			{
-				if (UML_HexPathfinder::IsTileWalkable(WaterPath.ExitTile.Get()))
-				{
-					SpawnTile = WaterPath.ExitTile.Get();
-					break;
-				}
-				if (UML_HexPathfinder::IsTileWalkable(WaterPath.EntryTile.Get()))
-				{
-					SpawnTile = WaterPath.EntryTile.Get();
-					break;
-				}
-			}
-		}
-
-		if (!IsValid(SpawnTile))
-		{
-			UE_LOG(LogTemp, Warning, TEXT("[PlayerCharacter] Last solved board '%s' has no walkable exit or water-path tile — skipping spawn restore."), *LastPuzzle.ToString());
-			break;
-		}
-
-		// Place the player just above the tile so the character controller settles onto the surface.
-		const float CapsuleHalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
-		const FVector SpawnLocation = SpawnTile->GetActorLocation() + FVector(0.f, 0.f, CapsuleHalfHeight + 10.f);
-		TeleportTo(SpawnLocation, GetActorRotation());
-
-		// Force the tile lookup NOW (synchronously) instead of waiting for the movement-based check
-		// in Tick, so CurrentTileOn points at the tile we just landed on before any cinematic plays.
-		UpdateCurrentTile();
-		SpawnBoard = Board;
-
-		UE_LOG(LogTemp, Log, TEXT("[PlayerCharacter] Restored spawn to walkable tile of puzzle '%s'."), *LastPuzzle.ToString());
-		break;
-	}
-
-	// ---- Step 2: spawn board replays OnWin; every other solved board revives its nature zones ----
-	// Every solved board revitalizes its nature zones directly through Revive() (a
-	// BlueprintNativeEvent authored in the nature-zone Blueprint). During a real win the zones are
-	// woken one by one by event tracks inside the win LevelSequence, but that cinematic is
-	// deliberately skipped on load (see UML_WinLoseSubsystem::IsReplayingWinForLoad), so the
-	// revival has to be driven from here instead.
-	//
-	// The board the player was teleported onto (SpawnBoard) ALSO re-fires its OnWin, because the
-	// rest of the win reactions only run for it: water paths spawning, the obstacle being
-	// destroyed, steles switching state, outlines hiding, and - the one that would strand the
-	// player if it were skipped - its exit grounds being enabled. If placement failed
-	// (SpawnBoard == null) no board replays OnWin and every solved board just revives.
-	UML_WinLoseSubsystem* WinLose = World->GetSubsystem<UML_WinLoseSubsystem>();
+	// Build the replay order: every board the save marks solved, with the LATEST-solved board LAST so
+	// the sequence walks the player from board to board and finally leaves them on it (as before).
+	AML_BoardSpawner* LatestBoard = nullptr;
+	TArray<AML_BoardSpawner*> OtherSolved;
 	for (TActorIterator<AML_BoardSpawner> It(World); It; ++It)
 	{
 		AML_BoardSpawner* Board = *It;
 		if (!IsValid(Board) || !Board->PuzzleID.IsValid()) continue;
-		if (!SaveSys->IsPuzzleSolved(Board->PuzzleID.GetTagName())) continue;
 
-		if (Board == SpawnBoard && WinLose)
+		const FName PuzzleName = Board->PuzzleID.GetTagName();
+		if (!SaveSys->IsPuzzleSolved(PuzzleName)) continue;
+
+		if (PuzzleName == LastPuzzle)
+			LatestBoard = Board;
+		else
+			OtherSolved.Add(Board);
+	}
+
+	OnLoadReplayQueue.Reset();
+	for (AML_BoardSpawner* Board : OtherSolved)
+		OnLoadReplayQueue.Add(Board);
+	if (LatestBoard)
+		OnLoadReplayQueue.Add(LatestBoard); // processed last → player ends here
+
+	if (OnLoadReplayQueue.Num() == 0) return;
+
+	bHasStartedOnLoadReplay = true;
+	ProcessNextOnLoadBoard();
+}
+
+void AML_PlayerCharacter::ProcessNextOnLoadBoard()
+{
+	UWorld* World = GetWorld();
+	if (!World) return;
+
+	// Drop any boards that became invalid while queued.
+	while (OnLoadReplayQueue.Num() > 0 && !OnLoadReplayQueue[0].IsValid())
+		OnLoadReplayQueue.RemoveAt(0);
+
+	if (OnLoadReplayQueue.Num() == 0) return; // done — player is on the latest-solved board
+
+	AML_BoardSpawner* Board = OnLoadReplayQueue[0].Get();
+	OnLoadReplayQueue.RemoveAt(0);
+
+	// Teleport onto this board FIRST, then fire its OnWin, so listeners that read the player's current
+	// tile / board (CurrentTileOn, CurrentBoardSpawner) produce the correct per-board result.
+	if (TeleportToBoard(Board))
+	{
+		if (UML_WinLoseSubsystem* WinLose = World->GetSubsystem<UML_WinLoseSubsystem>())
 			WinLose->ReplayOnWinForBoard(Board);
 
+		// After OnWin, revitalize this board's nature zones (every solved board, latest included).
 		for (AActor* ZoneActor : Board->GetAssociatedNatureZones())
 		{
 			if (AML_NatureZone* Zone = Cast<AML_NatureZone>(ZoneActor))
 				Zone->Revive();
 		}
 	}
+
+	if (OnLoadReplayQueue.Num() == 0) return; // that was the last board — stay here
+
+	// Wait a few frames so this board's win reactions apply before teleporting to the next board.
+	constexpr int32 FrameGap = 10;
+	OnLoadReplayFramesLeft = FrameGap;
+	World->GetTimerManager().SetTimerForNextTick(this, &AML_PlayerCharacter::TickOnLoadReplayGap);
+}
+
+void AML_PlayerCharacter::TickOnLoadReplayGap()
+{
+	UWorld* World = GetWorld();
+	if (!World) return;
+
+	if (--OnLoadReplayFramesLeft > 0)
+	{
+		World->GetTimerManager().SetTimerForNextTick(this, &AML_PlayerCharacter::TickOnLoadReplayGap);
+		return;
+	}
+
+	ProcessNextOnLoadBoard();
+}
+
+bool AML_PlayerCharacter::TeleportToBoard(AML_BoardSpawner* Board)
+{
+	const AML_Tile* SpawnTile = FindWalkableSpawnTile(Board);
+	if (!IsValid(SpawnTile))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[PlayerCharacter] Solved board '%s' has no walkable exit or water-path tile — cannot teleport for its OnWin replay."),
+			Board ? *Board->PuzzleID.ToString() : TEXT("<null>"));
+		return false;
+	}
+
+	// Place the player just above the tile so the character controller settles onto the surface.
+	const float CapsuleHalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+	const FVector SpawnLocation = SpawnTile->GetActorLocation() + FVector(0.f, 0.f, CapsuleHalfHeight + 10.f);
+	TeleportTo(SpawnLocation, GetActorRotation());
+
+	// Sync CurrentTileOn NOW (don't wait for the movement-based check in Tick) so the OnWin that
+	// follows sees the player standing on this board.
+	UpdateCurrentTile();
+	return true;
+}
+
+const AML_Tile* AML_PlayerCharacter::FindWalkableSpawnTile(const AML_BoardSpawner* Board) const
+{
+	if (!IsValid(Board)) return nullptr;
+
+	// 1. The first walkable ExitTile across all BoardExits (in order).
+	for (const FML_BoardExit& Exit : Board->BoardExits)
+		for (const TObjectPtr<AML_Tile>& ExitTile : Exit.ExitTiles)
+			if (UML_HexPathfinder::IsTileWalkable(ExitTile.Get()))
+				return ExitTile.Get();
+
+	// 2. Failing that, the first walkable water-path tile (Exit then Entry, in order).
+	for (const FML_WaterPath& WaterPath : Board->WaterPaths)
+	{
+		if (UML_HexPathfinder::IsTileWalkable(WaterPath.ExitTile.Get()))
+			return WaterPath.ExitTile.Get();
+		if (UML_HexPathfinder::IsTileWalkable(WaterPath.EntryTile.Get()))
+			return WaterPath.EntryTile.Get();
+	}
+
+	return nullptr;
 }
 
 void AML_PlayerCharacter::Tick(float DeltaTime)
