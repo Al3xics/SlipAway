@@ -11,6 +11,7 @@
 #include "Player/ML_HexPathfinder.h"
 #include "Player/ML_PlayerController.h"
 #include "Save System/ML_SaveSubsystem.h"
+#include "Subsystem/ML_HexGridSubsystem.h"
 #include "Subsystem/ML_WinLoseSubsystem.h"
 #include "TechArt/ML_NatureZone.h"
 #include "Tiles/ML_Tile.h"
@@ -71,6 +72,20 @@ void AML_PlayerCharacter::UpdateCurrentTile()
 					NewTile = Cast<AML_Tile>(ParentActor);
 			else
 				NewTile = Cast<AML_Tile>(HitActor);
+
+	// The trace only reaches a little below the feet. Stepping down a level (or more), the capsule center is
+	// already over the lower tile while the feet are still at the old height, so the trace can miss it for a
+	// frame — which used to read as "left the board" and reset the puzzle. Ask the global grid instead: a tile
+	// registered right under the character (and below it) is the one it stands on, whatever the height.
+	if (!NewTile)
+	{
+		if (const UML_HexGridSubsystem* HexGrid = UML_HexGridSubsystem::Get(this))
+		{
+			AML_Tile* GridTile = HexGrid->GetTileAtWorldLocation(ActorLocation);
+			if (IsValid(GridTile) && GridTile->GetActorLocation().Z <= ActorLocation.Z)
+				NewTile = GridTile;
+		}
+	}
 
 	if (NewTile == OldTile)
 		return;
