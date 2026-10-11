@@ -17,6 +17,7 @@
 #include "PuzzleGeneration/ML_PuzzleSolver.h"
 #include "Save System/ML_SaveSubsystem.h"
 #include "Subsystem/ML_CinematicSubsystem.h"
+#include "Subsystem/ML_HexGridSubsystem.h"
 #include "Subsystem/ML_WinLoseSubsystem.h"
 
 
@@ -213,9 +214,19 @@ void AML_BoardSpawner::BeginPlay()
 	// Never spawn new ones — the designer may have intentionally deleted some tiles.
 	UpdateCurrentGrid(false);
 
+	// Join the world-wide grid movement walks on. Right after the grid is built and before any early return
+	// below, so every board is walkable whatever its save / PuzzleID state.
+	if (UML_HexGridSubsystem* HexGrid = UML_HexGridSubsystem::Get(this))
+		HexGrid->RegisterBoard(this);
+
 	// Before the save block below, which returns early for a board without a PuzzleID: the lock reads the
 	// save for its PREREQUISITES, so it applies to any board the designer gated, ID or not.
 	RefreshLockState();
+
+	// A world board is terrain, not a puzzle: no PuzzleID, nothing saved, no win to listen to. Stop here so
+	// it never logs the "no PuzzleID" warning meant for puzzles that forgot theirs.
+	if (bIsWorldBoard)
+		return;
 
 #if !UE_BUILD_SHIPPING
 	if (PuzzleID.IsValid())
@@ -348,6 +359,14 @@ void AML_BoardSpawner::BeginPlay()
 				WinLoseSys->TriggerConnectedGoalAnimationForBoard(Board, /*bImmediate=*/true);
 		});
 	}
+}
+
+void AML_BoardSpawner::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (UML_HexGridSubsystem* HexGrid = UML_HexGridSubsystem::Get(this))
+		HexGrid->UnregisterBoard(this);
+
+	Super::EndPlay(EndPlayReason);
 }
 
 void AML_BoardSpawner::UpdateCurrentGridEditor()
@@ -500,6 +519,7 @@ void AML_BoardSpawner::UpdateCurrentGrid(bool bAllowSpawn)
 
 	GridMap = MoveTemp(NewTilesByAxial);
 	RefreshTileCaches();
+	ValidateGridAlignment();
 }
 
 void AML_BoardSpawner::RefreshTileCaches()
@@ -516,6 +536,7 @@ void AML_BoardSpawner::RefreshTileCaches()
 
 		SpawnedTiles.Add(Tile);
 		Tile->SetBorderTile(false);
+		Tile->RefreshHeightLevelFromLocation();
 
 		if (UML_TileTypeTraits::IsTreeType(Tile->GetCurrentType()))
 		{
@@ -668,8 +689,19 @@ AML_CameraRail* AML_BoardSpawner::GetClosestCameraRail(const FVector& WorldLocat
 {
 	float MinDistSq = FLT_MAX;
 	AML_CameraRail* ClosestCameraRail = nullptr;
-	
-	for (const auto& Rail : AssociatedCameraRails)
+
+	// A board with no rail of its own (a test map, a board placed before its rails) falls back to every rail
+	// of the level, so leaving it never ends on a null view target (Unreal then shows the pawn's own view).
+	TArray<AML_CameraRail*> CandidateRails;
+	for (AML_CameraRail* Rail : AssociatedCameraRails)
+		if (IsValid(Rail))
+			CandidateRails.Add(Rail);
+
+	if (CandidateRails.IsEmpty())
+		for (TActorIterator<AML_CameraRail> It(GetWorld()); It; ++It)
+			CandidateRails.Add(*It);
+
+	for (AML_CameraRail* Rail : CandidateRails)
 	{
 		// Get the closest key from the LooAt spline from the WorldLocation parameter, then get the world location of this key
 		float InputKey = Rail->GetLookAtFromCameraRail()->FindInputKeyClosestToWorldLocation(WorldLocation);
@@ -688,34 +720,46 @@ AML_CameraRail* AML_BoardSpawner::GetClosestCameraRail(const FVector& WorldLocat
 
 FVector AML_BoardSpawner::AxialToWorld(int32 Q, int32 R) const
 {
-	const float Sqrt3 = 1.73205080757f;
-
-	float X2D = 0.f;
-	float Y2D = 0.f;
-
-	if (Orientation == EML_HexOrientation::FlatTop)
-	{
-		X2D = TileSize * (1.5f * Q);
-		Y2D = TileSize * (Sqrt3 * (R + 0.5f * Q));
-	}
-	else // PointyTop
-	{
-		X2D = TileSize * (Sqrt3 * (Q + 0.5f * R));
-		Y2D = TileSize * (1.5f * R);
-	}
-
-	return GetActorLocation() + FVector(X2D, Y2D, 0.f);
+	const FVector2D Local = AxialToLocal2D(Q, R);
+	return GetActorLocation() + FVector(Local.X, Local.Y, 0.f);
 }
 
 FIntPoint AML_BoardSpawner::WorldToAxial(const FVector& WorldLocation) const
 {
+	return Local2DToAxial(FVector2D(WorldLocation - GetActorLocation()));
+}
+
+FVector2D AML_BoardSpawner::AxialToLocal2D(int32 Q, int32 R)
+{
+	const UML_MycelandDeveloperSettings* Settings = UML_MycelandDeveloperSettings::GetMycelandDeveloperSettings();
+	const float TileSize = FMath::Max(Settings->HexTileSize, 1.f);
 	const float Sqrt3 = 1.73205080757f;
-	const FVector Local = WorldLocation - GetActorLocation();
+
+	if (Settings->HexOrientation == EML_HexOrientation::FlatTop)
+		return FVector2D(TileSize * (1.5f * Q), TileSize * (Sqrt3 * (R + 0.5f * Q)));
+
+	// PointyTop
+	return FVector2D(TileSize * (Sqrt3 * (Q + 0.5f * R)), TileSize * (1.5f * R));
+}
+
+FVector AML_BoardSpawner::SnapToLattice(const FVector& WorldLocation)
+{
+	const FVector& Origin = UML_MycelandDeveloperSettings::GetMycelandDeveloperSettings()->HexGridOrigin;
+	const FIntPoint Axial = Local2DToAxial(FVector2D(WorldLocation - Origin));
+	const FVector2D Snapped = AxialToLocal2D(Axial.X, Axial.Y);
+	return FVector(Origin.X + Snapped.X, Origin.Y + Snapped.Y, WorldLocation.Z);
+}
+
+FIntPoint AML_BoardSpawner::Local2DToAxial(const FVector2D& Local)
+{
+	const UML_MycelandDeveloperSettings* Settings = UML_MycelandDeveloperSettings::GetMycelandDeveloperSettings();
+	const float TileSize = FMath::Max(Settings->HexTileSize, 1.f);
+	const float Sqrt3 = 1.73205080757f;
 
 	float Qf = 0.f;
 	float Rf = 0.f;
 
-	if (Orientation == EML_HexOrientation::FlatTop)
+	if (Settings->HexOrientation == EML_HexOrientation::FlatTop)
 	{
 		Qf = (2.f / 3.f * Local.X) / TileSize;
 		Rf = (-1.f / 3.f * Local.X + (Sqrt3 / 3.f) * Local.Y) / TileSize;
@@ -752,6 +796,80 @@ FIntPoint AML_BoardSpawner::WorldToAxial(const FVector& WorldLocation) const
 	}
 
 	return FIntPoint(Rx, Rz);
+}
+
+// ==================== Global Lattice & Heights ====================
+
+void AML_BoardSpawner::SnapBoardToLattice()
+{
+	const FVector Current = GetActorLocation();
+	const FVector Snapped = SnapToLattice(Current);
+	if (FVector::DistSquared2D(Current, Snapped) <= FMath::Square(0.1f))
+		return;
+
+	// Tiles are attached to the board, so they follow it.
+	Modify();
+	SetActorLocation(Snapped);
+
+	UE_LOG(LogTemp, Log, TEXT("[HexGrid] Board '%s' snapped to the global lattice (moved %.1f cm)."),
+		*GetName(), FVector::Dist2D(Current, Snapped));
+}
+
+void AML_BoardSpawner::SnapTileHeights()
+{
+	const UML_MycelandDeveloperSettings* Settings = UML_MycelandDeveloperSettings::GetMycelandDeveloperSettings();
+
+	int32 Moved = 0;
+	for (const TPair<FIntPoint, TObjectPtr<AML_Tile>>& Pair : GridMap)
+	{
+		AML_Tile* Tile = Pair.Value.Get();
+		if (!IsValid(Tile) || Tile->GetHeightLevelError() <= 0.1f)
+			continue;
+
+		FVector Location = Tile->GetActorLocation();
+		Location.Z = Settings->GetZFromHeightLevel(Settings->GetHeightLevelFromZ(Location.Z));
+
+		Tile->Modify();
+		Tile->SetActorLocation(Location);
+		++Moved;
+	}
+
+	RefreshTileCaches();
+
+	UE_LOG(LogTemp, Log, TEXT("[HexGrid] Board '%s': %d tile(s) snapped to their height level."), *GetName(), Moved);
+}
+
+void AML_BoardSpawner::ValidateGridAlignment() const
+{
+#if !UE_BUILD_SHIPPING
+	// 1 cm of slack: hand-placed boards are never exact to the float, but a real offset is always far more.
+	constexpr float Tolerance = 1.f;
+
+	const FVector Location = GetActorLocation();
+	const float LatticeOffset = FVector::Dist2D(Location, SnapToLattice(Location));
+	if (LatticeOffset > Tolerance)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[HexGrid] Board '%s' is %.1f cm off the global hex lattice — the player will not be able to walk "
+			     "between its tiles and the neighboring boards. Click 'Snap Board To Lattice' (ML- Hex Grid)."),
+			*GetName(), LatticeOffset);
+	}
+
+	int32 OffLevelTiles = 0;
+	for (const TPair<FIntPoint, TObjectPtr<AML_Tile>>& Pair : GridMap)
+	{
+		if (const AML_Tile* Tile = Pair.Value.Get(); IsValid(Tile) && Tile->GetHeightLevelError() > Tolerance)
+			++OffLevelTiles;
+	}
+
+	if (OffLevelTiles > 0)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[HexGrid] Board '%s' has %d tile(s) between two height levels — their level is rounded, so the "
+			     "climb rules may not match what you see. Click 'Snap Tile Heights' (ML- Hex Grid)."),
+			*GetName(), OffLevelTiles);
+	}
+#endif
 }
 
 void AML_BoardSpawner::SpawnHexagonRadius()

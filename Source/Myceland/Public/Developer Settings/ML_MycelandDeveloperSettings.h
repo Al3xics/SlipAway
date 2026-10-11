@@ -369,6 +369,65 @@ public:
 	bool bLockUnreachedPuzzleBoards = true;
 
 
+	// ==================== Gameplay · Hex Grid ====================
+	// One lattice shared by every board (puzzle, hub, world). Movement walks across boards on a single
+	// global grid, so two boards can only connect if their tiles sit on the same hexagonal lattice.
+	// Boards read their tile size / orientation from here instead of carrying their own.
+
+	UPROPERTY(EditAnywhere, config, BlueprintReadOnly, Category="Gameplay|Hex Grid", meta=(ClampMin="1.0", Units="cm", Tooltip="Hex tile size (center to corner) shared by every board. All boards must use the same lattice for the player to walk from one to another."))
+	float HexTileSize = 100.f;
+
+	UPROPERTY(EditAnywhere, config, BlueprintReadOnly, Category="Gameplay|Hex Grid", meta=(Tooltip="Hex orientation shared by every board."))
+	EML_HexOrientation HexOrientation = EML_HexOrientation::FlatTop;
+
+	// World-space point of axial (0,0) at height level 0. A board origin must sit on a lattice point
+	// relative to this (the board spawner warns when it does not), and height levels are counted from its Z,
+	// so levels compare correctly between two boards placed at different altitudes.
+	UPROPERTY(EditAnywhere, config, BlueprintReadOnly, Category="Gameplay|Hex Grid", meta=(Tooltip="World location of the global lattice origin: axial (0,0), height level 0. Board origins must sit on the lattice relative to it."))
+	FVector HexGridOrigin = FVector::ZeroVector;
+
+
+	// ==================== Gameplay · Movement ====================
+	// Tile-by-tile movement with height, the same rules for puzzle and world tiles.
+
+	UPROPERTY(EditAnywhere, config, BlueprintReadOnly, Category="Gameplay|Movement", meta=(ClampMin="1.0", Units="cm", Tooltip="Height of one tile level. A tile's level is its Z above the Hex Grid Origin divided by this value."))
+	float TileHeightStep = 50.f;
+
+	UPROPERTY(EditAnywhere, config, BlueprintReadOnly, Category="Gameplay|Movement", meta=(ClampMin="0", Tooltip="How many levels the player can climb in one step to a neighbor tile. 1 = the player walks onto a tile one level higher, but not two."))
+	int32 MaxClimbLevels = 1;
+
+	UPROPERTY(EditAnywhere, config, BlueprintReadOnly, Category="Gameplay|Movement", meta=(Tooltip="When enabled, the player can step down onto a neighbor tile from any height. When disabled, stepping down is limited to Max Climb Levels, like climbing."))
+	bool bCanDropAnyHeight = false;
+
+	UPROPERTY(EditAnywhere, config, BlueprintReadOnly, Category="Gameplay|Movement", meta=(ClampMin="16", Tooltip="Most tiles a single path search may explore before giving up. Bounds the cost of a click far away on a big world; a target farther than this is treated as unreachable (or reached partially, for hold-to-move)."))
+	int32 PathfindingMaxExploredTiles = 4096;
+
+	// Single rule for "can the player step from a tile at FromLevel to a neighbor at ToLevel" — pathfinder,
+	// hover preview and gamepad all go through it, so the glow and the real path can never disagree.
+	bool IsHeightStepAllowed(const int32 FromLevel, const int32 ToLevel) const
+	{
+		const int32 Delta = ToLevel - FromLevel;
+		if (Delta > 0)
+			return Delta <= MaxClimbLevels;
+		return bCanDropAnyHeight || -Delta <= MaxClimbLevels;
+	}
+
+	// Height level of a world Z, counted from the Hex Grid Origin.
+	int32 GetHeightLevelFromZ(const float WorldZ) const
+	{
+		return FMath::RoundToInt((WorldZ - HexGridOrigin.Z) / FMath::Max(TileHeightStep, 1.f));
+	}
+
+	// World Z of a height level (the inverse of GetHeightLevelFromZ).
+	float GetZFromHeightLevel(const int32 Level) const
+	{
+		return HexGridOrigin.Z + Level * FMath::Max(TileHeightStep, 1.f);
+	}
+
+	// Highest climb in centimeters, for the character's MaxStepHeight.
+	float GetMaxClimbHeight() const { return MaxClimbLevels * FMath::Max(TileHeightStep, 1.f); }
+
+
 	// ==================== Cheats ====================
 	// Demo-only cheat mode (see UML_CheatSubsystem). Everything below is inert while Enable Cheats is
 	// off: the toggle key is never even mapped, so a shipped build cannot open the mode at all.

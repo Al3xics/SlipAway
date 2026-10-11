@@ -25,6 +25,7 @@
 #include "Subsystem/ML_RollBackSubsystem.h"
 #include "Subsystem/ML_BoardActionSubsystem.h"
 #include "Subsystem/ML_CheatSubsystem.h"
+#include "Subsystem/ML_HexGridSubsystem.h"
 #include "Subsystem/ML_WavePropagationSubsystem.h"
 #include "Subsystem/ML_SoundSubsystem.h"
 #include "Tiles/ML_Tile.h"
@@ -55,11 +56,15 @@ void AML_PlayerController::TickMoveAlongPath(float DeltaTime)
 	if (!bIsMoving)
 		return;
 
-	// Handle nav mesh movement (FreeMovement, EnteringBoard, and the ExitingBoard walk-out off the board)
+	// Handle nav mesh movement (FreeMovement, EnteringBoard, and the ExitingBoard walk-out off the board).
+	// A tile path being walked always wins: a grid move on a world board runs in FreeMovement mode, but it
+	// is tile by tile, never navmesh.
+	const bool bFollowingTilePath = CurrentPathIndex < CurrentPathWorld.Num();
 	const EML_PlayerMovementMode NavMode = TransitionComponent->GetMovementMode();
-	if (NavMode == EML_PlayerMovementMode::FreeMovement ||
-	    NavMode == EML_PlayerMovementMode::EnteringBoard ||
-	    NavMode == EML_PlayerMovementMode::ExitingBoard)
+	if (!bFollowingTilePath &&
+	    (NavMode == EML_PlayerMovementMode::FreeMovement ||
+	     NavMode == EML_PlayerMovementMode::EnteringBoard ||
+	     NavMode == EML_PlayerMovementMode::ExitingBoard))
 	{
 		if (NavigationBridgeComponent && NavigationBridgeComponent->TickNavMeshMovement(DeltaTime))
 		{
@@ -139,8 +144,7 @@ void AML_PlayerController::TickMoveAlongPath(float DeltaTime)
 			if (UCharacterMovementComponent* MC = MycelandCharacter->GetCharacterMovement())
 				MC->StopMovementImmediately();
 
-			CurrentPathWorld.Reset();
-			CurrentPathIndex = 0;
+			ResetTilePath();
 
 			// Stop the path tick WITHOUT broadcasting the "stopped" state yet: OnPathFinished settles the
 			// board action state to Idle (or starts a new move). We defer the notification so it reflects
@@ -169,6 +173,17 @@ void AML_PlayerController::OnPathFinished()
 		StartNavMeshMovement(Cmd.NavMeshTarget);
 	else if (Cmd.bStartBoardPath)
 		StartMoveAlongPath(Cmd.BoardPath, Cmd.BoardGridMap);
+
+	// A grid move asked for while the recorded puzzle move was walking: that move has now landed (and been
+	// recorded), so start it from here. Dropped if the landing started something else (a turn to plant).
+	if (AML_Tile* PendingTarget = PendingGridMoveTarget.Get())
+	{
+		const int32 StopBefore = PendingGridMoveStopBefore;
+		PendingGridMoveTarget.Reset();
+
+		if (!bIsMoving && TransitionComponent->GetBoardActionState() == EML_PlayerBoardActionState::Idle)
+			Move(PendingTarget, StopBefore);
+	}
 }
 
 void AML_PlayerController::SetIsMoving(bool bNewIsMoving)
@@ -190,10 +205,16 @@ bool AML_PlayerController::Move(AML_Tile* TargetTile, int32 StopBeforeTarget)
 
 	if (!IsValid(MycelandCharacter) || !IsValid(MycelandCharacter->CurrentTileOn)) return false;
 	if (!IsValid(TargetTile)) return false;
-
-	AML_BoardSpawner* Board = MycelandCharacter->CurrentTileOn->GetBoardSpawnerFromTile();
-	if (!IsValid(Board) || TargetTile->GetOwner() != Board) return false;
 	if (TransitionComponent->GetBoardActionState() == EML_PlayerBoardActionState::TurningToPlant) return false;
+
+	// Any new move request replaces a grid move still waiting for the current puzzle move to land.
+	PendingGridMoveTarget.Reset();
+
+	// Inside an open puzzle, toward a tile of that same puzzle: the recorded (undo-able) board move below,
+	// unchanged. Everything else — another board, a world board, a solved puzzle — walks the global grid.
+	AML_BoardSpawner* Board = MycelandCharacter->CurrentTileOn->GetBoardSpawnerFromTile();
+	if (!IsValid(Board) || TargetTile->GetOwner() != Board || !Board->ShouldStopPlayerOnEntry())
+		return StartGridMove(TargetTile, StopBeforeTarget);
 
 	const TMap<FIntPoint, AML_Tile*> GridMap = Board->GetGridMap();
 	const FIntPoint StartAxial = MycelandCharacter->CurrentTileOn->GetAxialCoord();
@@ -227,6 +248,7 @@ bool AML_PlayerController::Plant(AML_Tile* TargetTile)
 	if (TransitionComponent->GetMovementMode() != EML_PlayerMovementMode::InsideBoard) return false;
 	if (TransitionComponent->GetBoardActionState() == EML_PlayerBoardActionState::TurningToPlant) return false;
 	if (!IsValid(MycelandCharacter) || !IsValid(MycelandCharacter->CurrentTileOn)) return false;
+	PendingGridMoveTarget.Reset();
 	if (EnergyComponent->GetCurrentEnergy() <= 0) return RejectPlantWithFeedback();
 	if (!IsValid(TargetTile)) return RejectPlantWithFeedback();
 
@@ -309,6 +331,148 @@ void AML_PlayerController::ExecutePlant(AML_Tile* HitTile)
 			);
 		}
 	}
+}
+
+// ==================== Movement - Grid Moves (global hex grid) ====================
+
+bool AML_PlayerController::StartGridMove(AML_Tile* TargetTile, const int32 StopBeforeTarget)
+{
+	UML_HexGridSubsystem* Grid = UML_HexGridSubsystem::Get(this);
+	if (!Grid || !IsValid(TargetTile) || !IsValid(MycelandCharacter) || !IsValid(MycelandCharacter->CurrentTileOn))
+		return false;
+
+	// A recorded puzzle move is still walking: its undo record must close on a tile of the puzzle, so this
+	// grid move waits for it to land and starts from there (OnPathFinished). An undo replay is never cut.
+	if (MoveRecordingComponent->IsMoveInProgress())
+	{
+		if (MoveRecordingComponent->IsUndoMovePlayback())
+			return false;
+
+		PendingGridMoveTarget = TargetTile;
+		PendingGridMoveStopBefore = StopBeforeTarget;
+		return true;
+	}
+
+	// From the tile the player is walking to (a redirect never turns back), cut at a puzzle's first tile.
+	TArray<AML_Tile*> Path;
+	if (!BuildGridMovePath(TargetTile, Path))
+		return false;
+
+	if (StopBeforeTarget > 0)
+	{
+		if (Path.Num() <= StopBeforeTarget) return false;
+		Path.SetNum(Path.Num() - StopBeforeTarget);
+	}
+
+	// Standing still on the target already: nothing to do.
+	if (Path.Num() == 0 || (Path.Num() == 1 && Path[0] == MycelandCharacter->CurrentTileOn && !bIsMoving))
+		return false;
+
+	// Before starting: StartMoveAlongTilePath may finish on the spot and settle the state to Idle.
+	// SetBoardActionState also drops any leftover exit-hold intent.
+	TransitionComponent->SetBoardActionState(EML_PlayerBoardActionState::Moving);
+	StartMoveAlongTilePath(Path);
+	return true;
+}
+
+void AML_PlayerController::StartMoveAlongTilePath(const TArray<AML_Tile*>& Path)
+{
+	if (NavigationBridgeComponent)
+		NavigationBridgeComponent->StopNavMeshMovement();
+
+	ResetTilePath();
+	CurrentPathWorld.Reserve(Path.Num());
+	CurrentPathTiles.Reserve(Path.Num());
+
+	for (AML_Tile* Tile : Path)
+	{
+		if (!IsValid(Tile)) continue;
+		CurrentPathWorld.Add(Tile->GetActorLocation());
+		CurrentPathTiles.Add(Tile);
+	}
+
+	if (CurrentPathWorld.Num() == 0)
+	{
+		SetIsMoving(false);
+		return;
+	}
+
+	bGridMoveActive = true;
+
+	// Skip the first point if already there.
+	if (const APawn* P = GetPawn())
+		if (FVector::DistSquared2D(P->GetActorLocation(), CurrentPathWorld[0]) <= FMath::Square(AcceptanceRadius))
+			CurrentPathIndex = 1;
+
+	if (CurrentPathIndex >= CurrentPathWorld.Num())
+	{
+		ResetTilePath();
+		SetIsMoving(false);
+		OnPathFinished();
+		return;
+	}
+
+	SetIsMoving(true);
+}
+
+bool AML_PlayerController::WouldMoveUseGrid(const AML_Tile* TargetTile) const
+{
+	if (!IsValid(TargetTile) || !IsValid(MycelandCharacter) || !IsValid(MycelandCharacter->CurrentTileOn))
+		return false;
+
+	// Same routing as Move().
+	const AML_BoardSpawner* Board = MycelandCharacter->CurrentTileOn->GetBoardSpawnerFromTile();
+	return !IsValid(Board) || TargetTile->GetOwner() != Board || !Board->ShouldStopPlayerOnEntry();
+}
+
+bool AML_PlayerController::BuildGridMovePath(const AML_Tile* TargetTile, TArray<AML_Tile*>& OutPath) const
+{
+	OutPath.Reset();
+
+	const UML_HexGridSubsystem* Grid = UML_HexGridSubsystem::Get(this);
+	const AML_Tile* StartTile = GetMoveOriginTile();
+	if (!Grid || !IsValid(StartTile) || !IsValid(TargetTile))
+		return false;
+
+	if (!UML_HexPathfinder::FindPath(*Grid, StartTile, TargetTile, /*bAllowPartial=*/false, OutPath))
+		return false;
+
+	// Walking into an open puzzle stops on its first tile.
+	UML_HexPathfinder::TruncateAtBoardEntry(OutPath);
+	return OutPath.Num() > 0;
+}
+
+AML_Tile* AML_PlayerController::GetMoveOriginTile() const
+{
+	if (bIsMoving && bGridMoveActive && CurrentPathTiles.Num() == CurrentPathWorld.Num() && CurrentPathTiles.IsValidIndex(CurrentPathIndex))
+	{
+		if (AML_Tile* HeadingTile = CurrentPathTiles[CurrentPathIndex].Get())
+			return HeadingTile;
+	}
+
+	return IsValid(MycelandCharacter) ? MycelandCharacter->CurrentTileOn : nullptr;
+}
+
+void AML_PlayerController::ResetTilePath()
+{
+	CurrentPathWorld.Reset();
+	CurrentPathTiles.Reset();
+	CurrentPathIndex = 0;
+	bGridMoveActive = false;
+}
+
+void AML_PlayerController::ApplyClimbHeightToCharacter() const
+{
+	if (!IsValid(MycelandCharacter) || !DevSettings)
+		return;
+
+	// A little above one climb so the capsule never catches on a step the pathfinder allowed, and far below
+	// the next one so it can never climb a step the pathfinder refused. Overrides the Blueprint value on purpose.
+	constexpr float ClimbMargin = 10.f;
+	constexpr float MinStepHeight = 20.f;
+
+	if (UCharacterMovementComponent* MovementComponent = MycelandCharacter->GetCharacterMovement())
+		MovementComponent->MaxStepHeight = FMath::Max(DevSettings->GetMaxClimbHeight() + ClimbMargin, MinStepHeight);
 }
 
 // ==================== Movement - Path Management ====================
@@ -488,27 +652,27 @@ void AML_PlayerController::HandleCurrentTileChanged(const AML_Tile* OldTile, con
 
 void AML_PlayerController::HandleBoardStateChanged(const AML_Tile* OldTile, const AML_Tile* NewTile)
 {
+	const AML_BoardSpawner* NewBoard = NewTile ? NewTile->GetBoardSpawnerFromTile() : nullptr;
+
 	// ---------- Energy ----------
-	if (NewTile)
-		EnergyComponent->InitNumberOfEnergyForLevel(NewTile->GetBoardSpawnerFromTile()->GetEnergyForPuzzle());
-	else
-		EnergyComponent->InitNumberOfEnergyForLevel(0);
+	// A puzzle hands the player its energy; a world board (or no board) has none to give.
+	const bool bHasPuzzleEnergy = IsValid(NewBoard) && !NewBoard->IsWorldBoard();
+	EnergyComponent->InitNumberOfEnergyForLevel(bHasPuzzleEnergy ? NewBoard->GetEnergyForPuzzle() : 0);
 
 	// ---------- Automatic transition: Free ↔ InsideBoard ----------
-	const bool bShouldBeInBoard = IsValid(NewTile);
+	// Board mode (plant, undo, board camera) only exists on an OPEN puzzle. A world board, or a puzzle whose
+	// transition is off (solved, locked), is walked in free movement — tile by tile all the same when the
+	// player moves on the grid (the tile path wins over the navmesh, see TickMoveAlongPath).
+	const bool bShouldBeInBoard = IsValid(NewBoard) && NewBoard->ShouldStopPlayerOnEntry();
 	const bool bCurrentlyOutsideBoard = TransitionComponent->IsOutsideBoardMovementMode();
 
-	// Per-board transition switch: if this board's transition is disabled, never auto-enter it —
-	// stay in free movement even while physically standing on its tiles.
-	const AML_BoardSpawner* NewBoard = NewTile ? NewTile->GetBoardSpawnerFromTile() : nullptr;
-	const bool bBoardTransitionOn = !IsValid(NewBoard) || NewBoard->IsBoardTransitionEnabled();
-
-	if (bShouldBeInBoard && bCurrentlyOutsideBoard && bBoardTransitionOn)
+	if (bShouldBeInBoard && bCurrentlyOutsideBoard)
 	{
 		SetMovementMode(EML_PlayerMovementMode::InsideBoard);
 
-		CurrentPathWorld.Reset();
-		CurrentPathIndex = 0;
+		// Replaces whatever was being walked (a grid move ends on this very tile anyway: it is cut at the
+		// puzzle's first tile) with a single step to the center of the entry tile.
+		ResetTilePath();
 
 		if (!IsValid(MycelandCharacter))
 			return;
@@ -601,7 +765,8 @@ void AML_PlayerController::OnPossess(APawn* aPawn)
 	if (MycelandCharacter)
 	{
 		MycelandCharacter->OnCurrentTileChanged.AddDynamic(this, &AML_PlayerController::HandleCurrentTileChanged);
-		MycelandCharacter->OnBoardChanged.AddDynamic(this, &AML_PlayerController::HandleBoardStateChanged);
+		// Puzzles only: energy, board mode and board camera belong to puzzles; a world board reads as "outside".
+		MycelandCharacter->OnPuzzleBoardChanged.AddDynamic(this, &AML_PlayerController::HandleBoardStateChanged);
 		HoverPreviewComponent->Initialize(this, MycelandCharacter);
 		TransitionComponent->Initialize(this, MycelandCharacter, DevSettings, RotateSpeed);
 		NavigationBridgeComponent->Initialize(this, MycelandCharacter, NavMeshAcceptanceRadius);
@@ -634,13 +799,15 @@ void AML_PlayerController::OnPossess(APawn* aPawn)
 		ApplyGameplayInputMappingContext();
 		ApplyCheatToggleInputMappingContext();
 
+		ApplyClimbHeightToCharacter();
+
 		MycelandCharacter->UpdateCurrentTile();
 		// Start inside the board only if the player stands on one AND that board's transition is enabled;
 		// otherwise stay in free movement even while standing on board tiles.
 		const AML_BoardSpawner* StartBoard = MycelandCharacter->CurrentTileOn
 			? MycelandCharacter->CurrentTileOn->GetBoardSpawnerFromTile()
 			: nullptr;
-		const bool bStartInBoard = IsValid(StartBoard) && StartBoard->IsBoardTransitionEnabled();
+		const bool bStartInBoard = IsValid(StartBoard) && StartBoard->ShouldStopPlayerOnEntry();
 		const EML_PlayerMovementMode InitialMode = bStartInBoard
 			? EML_PlayerMovementMode::InsideBoard
 			: EML_PlayerMovementMode::FreeMovement;
@@ -761,9 +928,9 @@ void AML_PlayerController::ApplyCameraForCurrentLocation(float BlendTime)
 		? MycelandCharacter->CurrentTileOn->GetBoardSpawnerFromTile()
 		: nullptr;
 
-	// Same rule as the movement mode: a board whose transition is disabled is never entered, so the
-	// player keeps the free-movement camera even while physically standing on its tiles.
-	if (IsValid(Board) && Board->IsBoardTransitionEnabled())
+	// Same rule as the movement mode: only an open puzzle is entered. A world board, or a puzzle whose
+	// transition is disabled, keeps the free-movement camera (rails) even while standing on its tiles.
+	if (IsValid(Board) && Board->ShouldStopPlayerOnEntry())
 	{
 		ACameraActor* BoardCamera = Board->GetAssociatedCamera();
 		ensureMsgf(IsValid(BoardCamera), TEXT("No camera associated to board %s found. Make sure there is one associated."), *Board->GetName());
@@ -783,6 +950,14 @@ void AML_PlayerController::ApplyCameraForCurrentLocation(float BlendTime)
 
 void AML_PlayerController::BlendToViewTarget(AActor* NewViewTarget, float BlendTime, float BlendExp, EViewTargetBlendFunction BlendFunc)
 {
+	// A null target makes Unreal fall back to the pawn's own view (a first-person-like camera). Never what a
+	// caller wants: keep the current camera and say who forgot to provide one.
+	if (!IsValid(NewViewTarget))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[Camera] BlendToViewTarget called with no target — camera kept as is. Check the board's Associated Camera / Associated Camera Rails, or that the level has a camera rail."));
+		return;
+	}
+
 	// Deactivate the tick of the old camera rail
 	if (AML_CameraRail* OldRail = Cast<AML_CameraRail>(GetViewTarget()))
 		OldRail->SetActorTickEnabled(false);
@@ -807,8 +982,7 @@ void AML_PlayerController::StartMoveAlongPath(const TArray<FIntPoint>& AxialPath
 	if (NavigationBridgeComponent)
 		NavigationBridgeComponent->StopNavMeshMovement();
 
-	CurrentPathWorld.Reset();
-	CurrentPathIndex = 0;
+	ResetTilePath();
 	CurrentPathWorld.Reserve(AxialPath.Num());
 
 	for (const FIntPoint& Axial : AxialPath)
@@ -831,8 +1005,7 @@ void AML_PlayerController::StartMoveAlongPath(const TArray<FIntPoint>& AxialPath
 	// If already at destination
 	if (CurrentPathIndex >= CurrentPathWorld.Num())
 	{
-		CurrentPathWorld.Reset();
-		CurrentPathIndex = 0;
+		ResetTilePath();
 		SetIsMoving(false);
 		OnPathFinished();
 		return;
@@ -843,6 +1016,9 @@ void AML_PlayerController::StartMoveAlongPath(const TArray<FIntPoint>& AxialPath
 
 void AML_PlayerController::StartNavMeshMovement(const FVector& WorldLocation)
 {
+	// A tile path left behind would take priority over the navmesh in TickMoveAlongPath.
+	ResetTilePath();
+
 	if (NavigationBridgeComponent)
 		NavigationBridgeComponent->StartNavMeshMovement(WorldLocation);
 	SetIsMoving(true);
@@ -1188,8 +1364,8 @@ void AML_PlayerController::CancelAllMovementForTeleport()
 
 	// Also drop the tile-by-tile board path: CancelPendingNavigation only covers the navmesh side,
 	// and a leftover board path would keep being ticked toward its old destination.
-	CurrentPathWorld.Reset();
-	CurrentPathIndex = 0;
+	ResetTilePath();
+	PendingGridMoveTarget.Reset();
 	SetIsMoving(false);
 
 	// A hold-to-leave-the-board in progress would keep ticking against the border tile we just
@@ -1252,8 +1428,8 @@ void AML_PlayerController::NotifyBoardTransitionDisabled(const AML_BoardSpawner*
 		return;
 
 	// Stop any in-progress tile-by-tile movement, then eject to free movement.
-	CurrentPathWorld.Reset();
-	CurrentPathIndex = 0;
+	ResetTilePath();
+	PendingGridMoveTarget.Reset();
 	SetIsMoving(false);
 	TransitionComponent->ForceFreeMovement();
 }

@@ -79,6 +79,19 @@ private:
 	UPROPERTY(EditAnywhere, Category="Myceland Tile")
 	bool bIsInteractable = true;
 
+	// Height level of this tile on the global grid: its Z above the Hex Grid Origin, divided by Tile Height Step
+	// (Project Settings > Myceland > Gameplay). Derived from the tile's location, never typed by hand: move the
+	// tile up or down, then click "Snap Tile Heights" on its board. Movement compares the levels of two neighbor
+	// tiles to know whether the player can step from one to the other (UML_MycelandDeveloperSettings::IsHeightStepAllowed).
+	UPROPERTY(VisibleAnywhere, Category="Myceland Tile|Height")
+	int32 HeightLevel = 0;
+
+	// Coordinate on the global hex grid shared by every board (see UML_HexGridSubsystem), set when the board
+	// registers its tiles at BeginPlay. Different from AxialCoord, which is local to the board and is what
+	// puzzle logic and saves use. Movement uses this one.
+	UPROPERTY(VisibleInstanceOnly, Transient, Category="Myceland Tile")
+	FIntPoint GlobalAxialCoord = FIntPoint(0, 0);
+
 	void SetBlocked(bool bNewBlocked);
 
 protected:
@@ -125,6 +138,12 @@ public:
 	UFUNCTION(BlueprintPure, Category="Myceland Tile|Getter & Setter")
 	FIntPoint GetAxialCoord() const { return AxialCoord; }
 
+	// Coordinate on the global grid (see GlobalAxialCoord). Only meaningful once the board has registered.
+	UFUNCTION(BlueprintPure, Category="Myceland Tile|Getter & Setter")
+	FIntPoint GetGlobalAxialCoord() const { return GlobalAxialCoord; }
+
+	void SetGlobalAxialCoord(const FIntPoint& InGlobalAxial) { GlobalAxialCoord = InGlobalAxial; }
+
 	UFUNCTION(BlueprintCallable, Category="Myceland Tile|Getter & Setter")
 	void SetCurrentType(const EML_TileType NewType) { CurrentType = NewType; }
 
@@ -143,6 +162,16 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category="Myceland Tile|Getter & Setter")
 	void SetBorderTile(const bool Value) { bIsBorderTile = Value; }
+
+	UFUNCTION(BlueprintPure, Category="Myceland Tile|Height")
+	int32 GetHeightLevel() const { return HeightLevel; }
+
+	// Recomputes HeightLevel from the tile's current Z. The board runs it on every grid refresh.
+	void RefreshHeightLevelFromLocation();
+
+	// Distance (cm) between the tile's Z and the exact Z of its level. Anything but ~0 means the tile
+	// sits between two levels and needs a "Snap Tile Heights" on its board.
+	float GetHeightLevelError() const;
 
 	UFUNCTION(BlueprintPure, Category="Myceland Tile|Getter & Setter")
 	bool IsBorderTile() const { return bIsBorderTile; }

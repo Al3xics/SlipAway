@@ -75,6 +75,12 @@ void AML_PlayerCharacter::UpdateCurrentTile()
 	if (NewTile == OldTile)
 		return;
 
+	// Airborne (dropping down a level or more): the floor is out of the trace's reach for a moment, which
+	// is not "leaving the board". Keep the last tile until the character lands — otherwise the drop would
+	// switch to free movement and reset the energy, then re-enter the board on landing (if it ever re-checks).
+	if (!NewTile && OldTile && GetCharacterMovement() && GetCharacterMovement()->IsFalling())
+		return;
+
 	CurrentTileOn = NewTile;
 	OnCurrentTileChanged.Broadcast(OldTile, NewTile);
 	HandleTileStateChange(OldTile, NewTile);
@@ -96,6 +102,22 @@ void AML_PlayerCharacter::HandleTileStateChange(const AML_Tile* OldTile, const A
 	// If we changed directly from one board to another, keep it.
 	// If we genuinely crossed a gate, keep it too.
 	OnBoardChanged.Broadcast(OldTile, NewTile);
+
+	// Same event seen through puzzles only: a world-board tile reads as "no puzzle". Walking world -> world
+	// fires nothing; puzzle -> world fires (puzzle tile, nullptr), world -> puzzle fires (nullptr, puzzle tile).
+	const bool bOldIsPuzzle = IsValid(OldBoard) && !OldBoard->IsWorldBoard();
+	const bool bNewIsPuzzle = IsValid(NewBoard) && !NewBoard->IsWorldBoard();
+	const AML_BoardSpawner* OldPuzzle = bOldIsPuzzle ? OldBoard : nullptr;
+	const AML_BoardSpawner* NewPuzzle = bNewIsPuzzle ? NewBoard : nullptr;
+
+	if (OldPuzzle != NewPuzzle)
+		OnPuzzleBoardChanged.Broadcast(bOldIsPuzzle ? OldTile : nullptr, bNewIsPuzzle ? NewTile : nullptr);
+}
+
+AML_BoardSpawner* AML_PlayerCharacter::GetCurrentPuzzleBoard() const
+{
+	AML_BoardSpawner* Board = IsValid(CurrentTileOn) ? CurrentTileOn->GetBoardSpawnerFromTile() : nullptr;
+	return IsValid(Board) && !Board->IsWorldBoard() ? Board : nullptr;
 }
 
 void AML_PlayerCharacter::BeginPlay()
@@ -256,9 +278,9 @@ void AML_PlayerCharacter::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 	
-	// Only check if the character has moved
-	FVector CurrentLocation = GetActorLocation();
-	CurrentLocation.Z = 0.f;
+	// Only check if the character has moved. Z counts too: landing after a drop barely moves the
+	// character in XY, and that landing is exactly when the tile under it must be found again.
+	const FVector CurrentLocation = GetActorLocation();
 	if (!LastCheckedLocation.Equals(CurrentLocation, 10.f)) // Tolerance of 10 units
 	{
 		UpdateCurrentTile();

@@ -549,6 +549,33 @@ void UML_HoverPreviewComponent::TickPathHoverPreview()
         return;
     }
 
+    // A click that walks the global grid (another board, a world board, out of a puzzle) previews that exact
+    // path — built by the same function as the move itself, so the glow never lies. The legacy navmesh
+    // prediction below only remains for a player off the grid, or off a world board with no grid path.
+    if (IsValid(PlayerCharacter) && IsValid(PlayerCharacter->CurrentTileOn) && OwningController->WouldMoveUseGrid(HoveredTile))
+    {
+        TArray<AML_Tile*> GridPath;
+        if (UML_HexPathfinder::IsTileWalkable(HoveredTile) && OwningController->BuildGridMovePath(HoveredTile, GridPath))
+        {
+            SetHoveredTileState(HoveredTile, true);
+            if (HoveredTile != PlayerCharacter->CurrentTileOn)
+            {
+                for (AML_Tile* Tile : GridPath)
+                    if (IsValid(Tile)) Tile->GlowPathWalk();
+                CurrentPreviewPath = GridPath;
+            }
+            return;
+        }
+
+        // On a world board the grid is the only authority: no path means the click does nothing.
+        const AML_BoardSpawner* PlayerBoard = PlayerCharacter->CurrentTileOn->GetBoardSpawnerFromTile();
+        if (IsValid(PlayerBoard) && PlayerBoard->IsWorldBoard())
+        {
+            SetHoveredTileState(HoveredTile, false);
+            return;
+        }
+    }
+
     // If the player is on the board, use their current tile
     if (IsValid(PlayerCharacter) && IsValid(PlayerCharacter->CurrentTileOn) &&
         PlayerCharacter->CurrentTileOn->GetBoardSpawnerFromTile() == Board)
