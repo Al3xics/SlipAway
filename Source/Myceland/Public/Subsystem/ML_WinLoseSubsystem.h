@@ -32,12 +32,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Myceland|Win Lose")
     void ForceBoardWin(AML_BoardSpawner* Board);
 
-	// Re-fires ONLY the OnWin event for an already-solved board — used on load to replay every normal
-	// win reaction (nature-zone revitalization, ambience, win propagation, BP progression, ...) through
-	// the exact same listeners a real win uses. Sets CurrentBoardSpawner so listeners key off Board,
-	// then broadcasts OnWin. Deliberately does NOT run the rest of the win sequence: no victory sound,
-	// no ClearWinPath, and no OnWinPathSettled — so AML_BoardSpawner::HandlePuzzleWon (bound to
-	// OnWinPathSettled) never re-saves or re-appends the solve order.
+	// Fires ONLY the OnWin event for Board: sets CurrentBoardSpawner so listeners key off it, then
+	// broadcasts OnWin — no other win-sequence side-effects (no victory sound, no ClearWinPath, and no
+	// OnWinPathSettled, so AML_BoardSpawner::HandlePuzzleWon never re-saves / re-appends the solve
+	// order). Used on load by AML_PlayerCharacter, which teleports the player onto Board first so
+	// listeners that read the player's current tile produce the correct per-board result.
 	UFUNCTION(BlueprintCallable, Category="Myceland|Win Lose")
 	void ReplayOnWinForBoard(AML_BoardSpawner* Board);
 

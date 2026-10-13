@@ -94,6 +94,11 @@ private:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="ML- Board Switches", meta=(AllowPrivateAccess="true"))
 	bool bBoardTransitionEnabled = true;
 
+	// World board: the terrain the player walks on between puzzles, not a puzzle. Walking onto it never stops
+	// the player. Movement itself treats every board the same; this only says what the board IS.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="ML- Board Switches", meta=(AllowPrivateAccess="true"))
+	bool bIsWorldBoard = false;
+
 	// Boards that must be solved before this one opens. Leave empty (the default) and the board is
 	// never locked — it keeps whatever its switches are set to, which is what every existing board
 	// and the hub rely on. Fill it and the board starts glow-less and non-enterable until all of
@@ -117,6 +122,10 @@ private:
 	FVector AxialToWorld(int32 Q, int32 R) const;
 	FIntPoint OffsetToAxial(int32 Col, int32 Row) const;
 
+	// Warns when this board is off the global lattice or has tiles between two height levels: either one
+	// would break walking between boards. Each warning names the button that fixes it. No-op in shipping.
+	void ValidateGridAlignment() const;
+
 	FML_PuzzleState BuildPuzzleStateFromCurrentGrid() const;
 
 	// Blueprint-only version (UHT can't expose the inline-allocator array above, so this
@@ -130,6 +139,9 @@ protected:
 	virtual void Destroyed() override;
 	virtual void BeginPlay() override;
 
+	// Leaves the global hex grid (UML_HexGridSubsystem), so a streamed-out board takes its tiles with it.
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
 #if WITH_EDITOR
 	// Editing bGlowEnabled/bBoardTransitionEnabled in the Details panel writes the field directly,
 	// bypassing the setters. Re-run their side-effects here so editor toggles behave like the setters.
@@ -139,6 +151,14 @@ protected:
 public:
 	AML_BoardSpawner();
 	FIntPoint WorldToAxial(const FVector& WorldLocation) const;
+
+	// Lattice math on the global hex grid (tile size + orientation from the developer settings).
+	// "Local" is a 2D offset from a lattice point (a board origin, or the global Hex Grid Origin).
+	static FVector2D AxialToLocal2D(int32 Q, int32 R);
+	static FIntPoint Local2DToAxial(const FVector2D& Local);
+
+	// Closest point of the global lattice to WorldLocation (XY snapped, Z kept).
+	static FVector SnapToLattice(const FVector& WorldLocation);
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="Myceland Runtime")
 	int32 EnergyForPuzzle = 1;
@@ -160,14 +180,8 @@ public:
 	UPROPERTY(EditAnywhere, Category="ML- Hex Grid|Rectangle", meta=(ClampMin="1", EditCondition="GridLayout==EML_HexGridLayout::RectangleWH", EditConditionHides))
 	int32 GridHeight = 5;
 
-	UPROPERTY(EditAnywhere, Category="ML- Hex Grid")
-	EML_HexOrientation Orientation = EML_HexOrientation::FlatTop;
-
 	UPROPERTY(EditAnywhere, Category="ML- Hex Grid", meta=(EditCondition="GridLayout==EML_HexGridLayout::RectangleWH", EditConditionHides))
 	EML_HexOffsetLayout OffsetLayout = EML_HexOffsetLayout::OddR;
-
-	UPROPERTY(EditAnywhere, Category="ML- Hex Grid", meta=(ClampMin="1.0"))
-	float TileSize = 100.f;
 
 	UPROPERTY(EditAnywhere, Category="ML- Hex Grid")
 	FRotator TileRotation = FRotator::ZeroRotator;
@@ -204,6 +218,19 @@ public:
 
 	UFUNCTION(CallInEditor, Category="ML- Hex Grid", meta=(DisplayName="Destroy Stale Tiles"))
 	void DestroyStaleTiles() const;
+
+	// Tile size and orientation now come from Project Settings > Myceland > Gameplay > Hex Grid, shared by
+	// every board so the player can walk from one board to another.
+
+	// Moves this board (and its attached tiles) onto the closest point of the global hex lattice. Only XY
+	// moves, never Z. Needed for the board's tiles to line up with the neighboring boards' tiles.
+	UFUNCTION(CallInEditor, Category="ML- Hex Grid", meta=(DisplayName="Snap Board To Lattice"))
+	void SnapBoardToLattice();
+
+	// Moves every tile of this board to the exact Z of its closest height level, then refreshes the levels.
+	// Workflow: raise or lower tiles by hand, then click this.
+	UFUNCTION(CallInEditor, Category="ML- Hex Grid", meta=(DisplayName="Snap Tile Heights"))
+	void SnapTileHeights();
 
 	// Fills the caller-provided inline buffer (no heap allocation, reusable across calls).
 	// Always outputs 6 entries, nullptr where no neighbor exists.
@@ -261,6 +288,15 @@ public:
 
 	UFUNCTION(BlueprintPure, Category="ML- Board Switches")
 	bool IsBoardTransitionEnabled() const { return bBoardTransitionEnabled; }
+
+	UFUNCTION(BlueprintPure, Category="ML- Board Switches")
+	bool IsWorldBoard() const { return bIsWorldBoard; }
+
+	// True when a path coming from another board must stop on this board's first tile: an open puzzle.
+	// A world board never stops the player, and neither does a puzzle with its transition off (solved, or
+	// locked by Required Puzzles) — it is walked across like terrain, as it always was.
+	UFUNCTION(BlueprintPure, Category="ML- Board Switches")
+	bool ShouldStopPlayerOnEntry() const { return !bIsWorldBoard && bBoardTransitionEnabled; }
 
 	/** Enables/disables this board's glow. Clears any active glow immediately when turning OFF. */
 	UFUNCTION(BlueprintCallable, Category="ML- Board Switches")

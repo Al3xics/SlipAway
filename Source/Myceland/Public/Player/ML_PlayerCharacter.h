@@ -15,6 +15,7 @@ class AML_Tile;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnCurrentTileChanged, const AML_Tile*, OldTile, const AML_Tile*, NewTile);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnBoardChanged, const AML_Tile*, OldTile, const AML_Tile*, NewTile);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPuzzleBoardChanged, const AML_Tile*, OldPuzzleTile, const AML_Tile*, NewPuzzleTile);
 
 UCLASS()
 class MYCELAND_API AML_PlayerCharacter : public ACharacter, public IML_DialogueSpeaker
@@ -38,6 +39,26 @@ private:
 	
 	void HandleTileStateChange(const AML_Tile* OldTile, const AML_Tile* NewTile) const;
 
+	// ---- On-load win replay ----
+	// On load, for every board the save marks solved we teleport the player onto it, fire its OnWin,
+	// wait a couple frames, then move to the next — ending on the latest-solved board. Teleporting
+	// first means each board's win effects run with the player actually standing on it.
+	TArray<TWeakObjectPtr<AML_BoardSpawner>> OnLoadReplayQueue;
+	int32 OnLoadReplayFramesLeft = 0;
+	bool bHasStartedOnLoadReplay = false;
+
+	// Teleports onto the next queued board, fires its OnWin, then waits a couple frames and repeats.
+	void ProcessNextOnLoadBoard();
+
+	// Frame-gap countdown between boards (chained next-tick timers); calls ProcessNextOnLoadBoard at 0.
+	void TickOnLoadReplayGap();
+
+	// Teleports the player onto a walkable tile of Board and syncs CurrentTileOn. False if none walkable.
+	bool TeleportToBoard(AML_BoardSpawner* Board);
+
+	// First walkable exit tile (across BoardExits), else first walkable water-path tile, else nullptr.
+	const AML_Tile* FindWalkableSpawnTile(const AML_BoardSpawner* Board) const;
+
 public:
 	virtual void BeginPlay() override;
 	
@@ -46,8 +67,21 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category="Myceland Character")
 	AML_Tile* CurrentTileOn = nullptr;
 	
+	// Fires whenever the player steps onto a tile of ANOTHER board — world boards included.
+	// Most gameplay wants OnPuzzleBoardChanged below instead.
 	UPROPERTY(BlueprintAssignable, Category="Myceland Character|Delegates")
 	FOnBoardChanged OnBoardChanged;
+
+	// Fires only when the PUZZLE the player stands in changes. A world-board tile counts as "no puzzle"
+	// (nullptr), exactly like open ground did before world boards existed — so a listener written for
+	// "entered / left a board" keeps working unchanged when bound here. Use it for anything puzzle-related:
+	// rollback, win/lose, energy, board camera, HUD shown only inside a puzzle.
+	UPROPERTY(BlueprintAssignable, Category="Myceland Character|Delegates")
+	FOnPuzzleBoardChanged OnPuzzleBoardChanged;
+
+	// The puzzle board the player stands in, or nullptr on a world board / open ground.
+	UFUNCTION(BlueprintPure, Category="Myceland Character")
+	AML_BoardSpawner* GetCurrentPuzzleBoard() const;
 	
 	UPROPERTY(BlueprintAssignable, Category = "Myceland Character|Delegates")
 	FOnCurrentTileChanged OnCurrentTileChanged;

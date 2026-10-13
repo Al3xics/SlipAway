@@ -53,6 +53,30 @@ private:
 	TArray<FVector> CurrentPathWorld;
 	int32 CurrentPathIndex = 0;
 
+	// ==================== Grid moves (global hex grid) ====================
+	// A grid move walks the global grid (UML_HexGridSubsystem), across boards, and is never recorded for
+	// undo. Every move that is not "inside an open puzzle, toward a tile of that puzzle" is a grid move.
+
+	// Tiles of the grid move being walked, index-aligned with CurrentPathWorld. Only meaningful while
+	// bGridMoveActive; lets a redirect start from the tile the player is heading to.
+	TArray<TWeakObjectPtr<AML_Tile>> CurrentPathTiles;
+	bool bGridMoveActive = false;
+
+	// Grid move requested while a recorded puzzle move was still walking: its undo record has to close on
+	// a puzzle tile first, so this one starts when it lands (OnPathFinished).
+	TWeakObjectPtr<AML_Tile> PendingGridMoveTarget;
+	int32 PendingGridMoveStopBefore = 0;
+
+	bool StartGridMove(AML_Tile* TargetTile, int32 StopBeforeTarget);
+	void StartMoveAlongTilePath(const TArray<AML_Tile*>& Path);
+
+	// Drops the tile path (board or grid) without touching bIsMoving.
+	void ResetTilePath();
+
+	// Sets the character's MaxStepHeight from the climb settings, so the capsule physically climbs every
+	// step the pathfinder allows (and the pathfinder stays the one deciding which steps are allowed).
+	void ApplyClimbHeightToCharacter() const;
+
 	bool bIsMoving = false;
 	bool bInCinematicMode = false;
 
@@ -363,6 +387,23 @@ public:
 	// ==================== Queries ====================
 
 	bool IsMoveInProgress() const { return MoveRecordingComponent && MoveRecordingComponent->IsMoveInProgress(); }
+
+	/**
+	 * The tile the player is walking toward during a grid move, else the tile it stands on. A gamepad step
+	 * computed from it never makes the character turn back to the center of the tile it is leaving.
+	 */
+	AML_Tile* GetMoveOriginTile() const;
+
+	/** True when Move(TargetTile) would walk the global grid (anything but a move inside the open puzzle the
+	 *  player stands in). The hover preview uses it to show the path the click will really take. */
+	bool WouldMoveUseGrid(const AML_Tile* TargetTile) const;
+
+	/**
+	 * The path a grid move toward TargetTile would walk right now: A* on the global grid from the move origin
+	 * (GetMoveOriginTile), cut on the first tile of an open puzzle. Single source for StartGridMove and the
+	 * hover preview, so the glowing path is always the one the player will walk. False if unreachable.
+	 */
+	bool BuildGridMovePath(const AML_Tile* TargetTile, TArray<AML_Tile*>& OutPath) const;
 	bool IsUndoMovePlayback() const { return MoveRecordingComponent && MoveRecordingComponent->IsUndoMovePlayback(); }
 
 	/** True while the gamepad is the active input device (used e.g. to keep the cursor hidden in menus). */

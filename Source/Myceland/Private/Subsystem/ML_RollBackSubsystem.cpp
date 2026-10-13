@@ -53,7 +53,9 @@ void UML_RollBackSubsystem::EnsureInitialized()
 	
 	if (!bBoardChangedDelegateBound)
 	{
-		PlayerCharacter->OnBoardChanged.AddDynamic(this, &UML_RollBackSubsystem::OnBoardChanged);
+		// Puzzles only: leaving a puzzle onto a world board resets it like leaving onto open ground, and
+		// leaving a world board never "resets" it.
+		PlayerCharacter->OnPuzzleBoardChanged.AddDynamic(this, &UML_RollBackSubsystem::OnBoardChanged);
 		bBoardChangedDelegateBound = true;
 	}
 

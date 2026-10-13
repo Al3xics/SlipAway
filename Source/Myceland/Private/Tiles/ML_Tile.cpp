@@ -7,6 +7,7 @@
 #include "NavAreas/NavArea_Null.h"
 #include "NavAreas/NavArea_Default.h"
 #include "Core/ML_TileTypeTraits.h"
+#include "Developer Settings/ML_MycelandDeveloperSettings.h"
 #include "Tiles/ML_TileBase.h"
 #include "Tiles/TileBase/ML_TileDirt.h"
 #include "Tiles/TileBase/ML_TileGrass.h"
@@ -212,6 +213,18 @@ void AML_Tile::UpdateClassAtRuntime_Silent(const EML_TileType NewTileType, const
 		SetBlocked(!bBlocked);
 
 	// NO OnTileTypeChanged(OldType, NewTileType) in silent mode
+}
+
+void AML_Tile::RefreshHeightLevelFromLocation()
+{
+	HeightLevel = UML_MycelandDeveloperSettings::GetMycelandDeveloperSettings()->GetHeightLevelFromZ(GetActorLocation().Z);
+}
+
+float AML_Tile::GetHeightLevelError() const
+{
+	const UML_MycelandDeveloperSettings* Settings = UML_MycelandDeveloperSettings::GetMycelandDeveloperSettings();
+	const float Z = GetActorLocation().Z;
+	return FMath::Abs(Z - Settings->GetZFromHeightLevel(Settings->GetHeightLevelFromZ(Z)));
 }
 
 void AML_Tile::NotifyParasiteReady()

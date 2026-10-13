@@ -281,10 +281,11 @@ void UML_CheatSubsystem::Cheat_WinCurrentPuzzle()
 		return;
 	}
 
-	AML_BoardSpawner* Board = Character->CurrentTileOn->GetBoardSpawnerFromTile();
+	// A world board is not a puzzle: there is nothing to win while walking on it.
+	AML_BoardSpawner* Board = Character->GetCurrentPuzzleBoard();
 	if (!IsValid(Board))
 	{
-		Feedback(LOCTEXT("NoBoard", "The player is not on a board"));
+		Feedback(LOCTEXT("NoBoard", "The player is not in a puzzle"));
 		return;
 	}
 

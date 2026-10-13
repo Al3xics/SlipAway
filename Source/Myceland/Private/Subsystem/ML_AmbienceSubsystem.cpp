@@ -228,7 +228,15 @@ void UML_AmbienceSubsystem::InitializePuzzleCount()
 	{
 		TArray<AActor*> FoundBoards;
 		UGameplayStatics::GetAllActorsOfClass(this, AML_BoardSpawner::StaticClass(), FoundBoards);
-		TotalPuzzleCount = FoundBoards.Num();
+
+		// World boards are terrain, never a puzzle to win: they must not dilute the progression.
+		TotalPuzzleCount = 0;
+		for (const AActor* Actor : FoundBoards)
+		{
+			const AML_BoardSpawner* Board = Cast<AML_BoardSpawner>(Actor);
+			if (IsValid(Board) && !Board->IsWorldBoard())
+				++TotalPuzzleCount;
+		}
 	}
 
 	TotalPuzzleCount = FMath::Max(TotalPuzzleCount, 1);
@@ -246,7 +254,7 @@ void UML_AmbienceSubsystem::SeedStateFromAlreadySolvedBoards()
 	for (AActor* Actor : FoundBoards)
 	{
 		const AML_BoardSpawner* Board = Cast<AML_BoardSpawner>(Actor);
-		if (IsValid(Board) && Board->bIsPuzzleSolved)
+		if (IsValid(Board) && !Board->IsWorldBoard() && Board->bIsPuzzleSolved)
 		{
 			WonBoards.Add(FObjectKey(Board));
 		}

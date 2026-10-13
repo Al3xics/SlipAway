@@ -674,7 +674,8 @@ void UML_WinLoseSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 	if (Player)
 	{
 		BoundPlayer = Player;
-		Player->OnBoardChanged.AddDynamic(this, &UML_WinLoseSubsystem::HandleBoardChanged);
+		// Puzzles only: on a world board there is no current puzzle (CurrentBoardSpawner stays null).
+		Player->OnPuzzleBoardChanged.AddDynamic(this, &UML_WinLoseSubsystem::HandleBoardChanged);
 	}
 
 	if (UML_RollBackSubsystem* RollBack = InWorld.GetSubsystem<UML_RollBackSubsystem>())
@@ -734,6 +735,12 @@ AML_BoardSpawner* UML_WinLoseSubsystem::FindBoardSpawner() const
 
 	AML_BoardSpawner* RetrievedBoardSpawner = Cast<AML_BoardSpawner>(BoardActor);
 	if (!RetrievedBoardSpawner)
+	{
+		return nullptr;
+	}
+
+	// A world board is never the current puzzle.
+	if (RetrievedBoardSpawner->IsWorldBoard())
 	{
 		return nullptr;
 	}

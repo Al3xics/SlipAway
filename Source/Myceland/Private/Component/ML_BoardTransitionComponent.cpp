@@ -356,7 +356,8 @@ void UML_BoardTransitionComponent::RequestBoardEntry(AML_Tile* TargetTile)
 	// Per-board transition switch: if the target board has entry/exit disabled, do nothing.
 	// The NavMesh move issued by the caller still runs, so the player walks to the tile in free movement.
 	const AML_BoardSpawner* Board = IsValid(TargetTile) ? TargetTile->GetBoardSpawnerFromTile() : nullptr;
-	if (IsValid(Board) && !Board->IsBoardTransitionEnabled()) return;
+	// A world board is never "entered" either: the player just walks onto it in free movement.
+	if (IsValid(Board) && !Board->ShouldStopPlayerOnEntry()) return;
 
 	PendingBoardEntryTargetTile = TargetTile;
 	bPendingBoardEntryOnArrival = true;

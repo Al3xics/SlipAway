@@ -7,6 +7,7 @@
 #include "Player/ML_HexPathfinder.h"
 #include "Tiles/ML_Tile.h"
 #include "Tiles/ML_BoardSpawner.h"
+#include "Subsystem/ML_HexGridSubsystem.h"
 
 void UML_MouseKeyboardInputHandler::OnMoveActionStarted()
 {
@@ -103,8 +104,9 @@ void UML_MouseKeyboardInputHandler::HandleInsideBoardClick()
 
 	AML_Tile* TargetTile = Controller->GetTileUnderCursor();
 
-	// Click on a tile in the board (move in board)
-	if (IsValid(TargetTile) && TargetTile->GetOwner() == Board)
+	// Click on a tile — of this board (recorded puzzle move) or of any other board reachable on the global
+	// grid (walks out of the puzzle tile by tile). An unreachable tile of another board does nothing.
+	if (IsValid(TargetTile))
 	{
 		Controller->Move(TargetTile);
 		return;
@@ -128,6 +130,16 @@ void UML_MouseKeyboardInputHandler::HandleFreeMovementClick()
 {
 	AML_Tile* TargetTile = Controller->GetTileUnderCursor();
 
+	// Standing on a tile (a world board, a solved puzzle): the player moves on the global grid, tile by tile.
+	// On a WORLD board the grid is the only authority: a click it cannot serve does nothing, so the navmesh
+	// can never carry the player up a step the climb rules refuse, nor off the grid. Elsewhere (a solved
+	// puzzle in a level without world boards, or open ground) the legacy navmesh behavior below still applies
+	// when the grid has no path.
+	const AML_PlayerCharacter* Character = Controller->GetMycelandCharacter();
+	const bool bOnTileGrid = IsValid(Character) && IsValid(Character->CurrentTileOn);
+	const AML_BoardSpawner* CurrentBoard = bOnTileGrid ? Character->CurrentTileOn->GetBoardSpawnerFromTile() : nullptr;
+	const bool bGridIsAuthoritative = IsValid(CurrentBoard) && CurrentBoard->IsWorldBoard();
+
 	if (IsValid(TargetTile))
 	{
 		AML_BoardSpawner* Board = TargetTile->GetBoardSpawnerFromTile();
@@ -135,6 +147,13 @@ void UML_MouseKeyboardInputHandler::HandleFreeMovementClick()
 
 		if (!UML_HexPathfinder::IsTileWalkable(TargetTile))
 		{
+			bIgnoreCurrentClick = true;
+			return;
+		}
+
+		if (bOnTileGrid && (Controller->Move(TargetTile) || bGridIsAuthoritative))
+		{
+			// The grid owns this click (moved, or refused it): the release must not start a navmesh move.
 			bIgnoreCurrentClick = true;
 			return;
 		}
@@ -150,5 +169,25 @@ void UML_MouseKeyboardInputHandler::HandleFreeMovementClick()
 	FHitResult Hit;
 	if (!Controller->GetHitResultUnderCursorByChannel(UEngineTypes::ConvertToTraceType(ECC_GameTraceChannel1), false, Hit)) return;
 	if (!Controller->IsClickableGround(Hit)) return;
+
+	// On the grid, a click on the ground right over a grid cell (between tiles, under decor) means that cell.
+	if (bOnTileGrid)
+	{
+		if (const UML_HexGridSubsystem* Grid = UML_HexGridSubsystem::Get(Controller))
+		{
+			if (AML_Tile* GroundTile = Grid->GetTileAtWorldLocation(Hit.Location); GroundTile && Controller->Move(GroundTile))
+			{
+				bIgnoreCurrentClick = true;
+				return;
+			}
+		}
+
+		if (bGridIsAuthoritative)
+		{
+			bIgnoreCurrentClick = true;
+			return;
+		}
+	}
+
 	HoldMoveCachedDestination = Hit.Location;
 }
