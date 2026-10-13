@@ -19,8 +19,9 @@ struct FML_CheatEntry
 {
 	GENERATED_BODY()
 
-	// Key(s) to press. Resolved from the mapping context for the fixed actions, formatted from
-	// the slot number for the teleport / level lists (see the Cheats section of the Dev Settings).
+	// Key(s) to press, all resolved from the cheat mapping context: by action for the fixed cheats,
+	// by Scalar modifier for the teleport / level slots. Falls back to the key format strings of the
+	// Cheats section of the Dev Settings when a slot has no mapping.
 	UPROPERTY(BlueprintReadOnly, Category = "Cheats")
 	FText Keys;
 
@@ -151,6 +152,13 @@ private:
 	TArray<FGameplayTag> GetSortedLevelTags() const;
 
 	FText ResolveKeyText(const UInputAction* Action) const;
+
+	// The slot lists share a single Axis1D action for their nine keys, so QueryKeysMappedToAction
+	// cannot tell which key means which slot: the mappings of the cheat IMC are walked instead, each
+	// one's Scalar modifier giving the slot its key stands for. Keyed by slot number.
+	TMap<int32, FText> ResolveSlotKeyTexts(const UInputAction* Action) const;
+
+	// Fallback for a slot the IMC does not map (or maps without a Scalar modifier).
 	FText FormatSlotKey(const FString& Format, int32 Slot) const;
 
 	// Cheat mode survives a level travel, but the overlay widget and the world do not: re-apply

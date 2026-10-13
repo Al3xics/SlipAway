@@ -385,6 +385,13 @@ public:
 	void RequestBoardEntry(AML_Tile* TargetTile);
 	void StopNavMeshMovement();
 
+	/**
+	 * Free-movement hold: navmesh-aware steering direction toward the cursor.
+	 * See UML_NavigationBridgeComponent::GetNavSteeringDirection for the return contract.
+	 */
+	bool GetNavSteeringDirection(const FVector& Destination, float DeltaTime, FVector& OutDirection);
+	void ResetNavSteering();
+
 	/** Stops NavMesh movement and cancels any pending board entry. Called when a cinematic interrupts navigation. */
 	void CancelPendingNavigation();
 

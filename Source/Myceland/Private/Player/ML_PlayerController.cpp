@@ -1158,6 +1158,18 @@ void AML_PlayerController::RequestBoardEntry(AML_Tile* TargetTile)
 	if (TransitionComponent) TransitionComponent->RequestBoardEntry(TargetTile);
 }
 
+bool AML_PlayerController::GetNavSteeringDirection(const FVector& Destination, float DeltaTime, FVector& OutDirection)
+{
+	OutDirection = FVector::ZeroVector;
+	return NavigationBridgeComponent
+		&& NavigationBridgeComponent->GetNavSteeringDirection(Destination, DeltaTime, OutDirection);
+}
+
+void AML_PlayerController::ResetNavSteering()
+{
+	if (NavigationBridgeComponent) NavigationBridgeComponent->ResetHoldSteering();
+}
+
 void AML_PlayerController::StopNavMeshMovement()
 {
 	if (NavigationBridgeComponent) NavigationBridgeComponent->StopNavMeshMovement();

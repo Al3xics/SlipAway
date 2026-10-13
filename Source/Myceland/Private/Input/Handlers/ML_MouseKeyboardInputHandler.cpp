@@ -12,6 +12,7 @@ void UML_MouseKeyboardInputHandler::OnMoveActionStarted()
 {
 	bIgnoreCurrentClick = false;
 	FollowTime = 0.f;
+	Controller->ResetNavSteering();
 
 	const EML_PlayerMovementMode Mode = Controller->GetMovementMode();
 	if (Mode == EML_PlayerMovementMode::InsideBoard)
@@ -39,16 +40,26 @@ void UML_MouseKeyboardInputHandler::OnMoveActionTriggered(float DeltaTime)
 	if (!Controller->IsClickableGround(Hit))
 		return;
 
-	// Keep driving the player toward the cursor even when it's over a non-walkable tile:
-	// the player should approach the obstacle and let physical collision stop it just short of entry,
-	// rather than freezing in place the moment the cursor crosses onto an obstacle tile.
+	// Keep driving the player toward the cursor even when it's over a non-walkable tile: the player
+	// should approach the obstacle and stop just short of it, rather than freezing in place the moment
+	// the cursor crosses onto an obstacle tile.
 	HoldMoveCachedDestination = Hit.Location;
-	const FVector Direction = (HoldMoveCachedDestination - Character->GetActorLocation()).GetSafeNormal();
-	Character->AddMovementInput(Direction, Controller->GetMoveSpeedScale());
+
+	// Steer along the navmesh rather than straight at the cursor, so holding walks AROUND obstacles
+	// instead of grinding into them. A zero direction with a valid nav result means "path consumed,
+	// stay put"; no nav result at all falls back to the raw direction so the hold never freezes.
+	FVector Direction;
+	if (!Controller->GetNavSteeringDirection(HoldMoveCachedDestination, DeltaTime, Direction))
+		Direction = (HoldMoveCachedDestination - Character->GetActorLocation()).GetSafeNormal();
+
+	if (!Direction.IsNearlyZero())
+		Character->AddMovementInput(Direction, Controller->GetMoveSpeedScale());
 }
 
 void UML_MouseKeyboardInputHandler::OnMoveActionReleased()
 {
+	Controller->ResetNavSteering();
+
 	const bool bWasHoldingExit = Controller->IsHoldingExitInput();
 	Controller->CancelExitHold();
 	if (bWasHoldingExit)

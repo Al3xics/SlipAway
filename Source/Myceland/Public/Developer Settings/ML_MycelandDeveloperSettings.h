@@ -419,18 +419,18 @@ public:
 	UPROPERTY(EditAnywhere, config, Category="Cheats|UI", meta=(Tooltip="Z-order of the cheat overlay. High enough to draw over the HUD and the menus."))
 	int32 CheatOverlayZOrder = 1000;
 
-	// The key text of the fixed cheats is read back from the IMC, but a single Axis1D action covers
-	// nine keys at once, so the slot lists cannot resolve theirs the same way: they are formatted
-	// from these instead. {0} is the slot number. Only worth touching if you rebind the slot keys.
+	// The slot keys are read back from the cheat IMC too (each mapping's Scalar modifier says which
+	// slot its key stands for), so these two formats are only the fallback for a slot the IMC does
+	// not map. {0} is the slot number.
 	// The toggle is a chord (Ctrl+Alt+C and the like) and Enhanced Input reports the chord modifiers
 	// as separate actions, so querying the IMC would only give back the final key. Written by hand here.
 	UPROPERTY(EditAnywhere, config, Category="Cheats|UI", meta=(Tooltip="Combo shown in the overlay for closing cheat mode. Written by hand because chord modifiers cannot be read back from the IMC."))
 	FString CheatToggleKeyText = TEXT("Ctrl+Alt+C");
 
-	UPROPERTY(EditAnywhere, config, Category="Cheats|UI", meta=(Tooltip="How the teleport slot keys are displayed in the overlay. {0} is the slot number."))
+	UPROPERTY(EditAnywhere, config, Category="Cheats|UI", meta=(Tooltip="Fallback text for a teleport slot the cheat IMC does not map - a mapped slot shows its real key. {0} is the slot number."))
 	FString CheatTeleportSlotKeyFormat = TEXT("{0}");
 
-	UPROPERTY(EditAnywhere, config, Category="Cheats|UI", meta=(Tooltip="How the level slot keys are displayed in the overlay. {0} is the slot number."))
+	UPROPERTY(EditAnywhere, config, Category="Cheats|UI", meta=(Tooltip="Fallback text for a level slot the cheat IMC does not map - a mapped slot shows its real key. {0} is the slot number."))
 	FString CheatLevelSlotKeyFormat = TEXT("F{0}");
 
 	// ---------- Cheats - Gameplay ----------

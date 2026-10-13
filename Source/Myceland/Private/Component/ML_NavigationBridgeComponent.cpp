@@ -65,6 +65,86 @@ void UML_NavigationBridgeComponent::StopNavMeshMovement()
 	bHasFreeMovementTarget = false;
 }
 
+void UML_NavigationBridgeComponent::ResetHoldSteering()
+{
+	HoldSteerPathPoints.Reset();
+	HoldSteerPointIndex = 0;
+	HoldSteerRefreshTimer = 0.f;
+	HoldSteerLastDestination = FVector::ZeroVector;
+}
+
+void UML_NavigationBridgeComponent::RefreshHoldSteeringPath(const FVector& Destination)
+{
+	HoldSteerRefreshTimer = 0.f;
+	HoldSteerLastDestination = Destination;
+	HoldSteerPathPoints.Reset();
+	HoldSteerPointIndex = 0;
+
+	if (!IsValid(PlayerCharacter))
+		return;
+
+	UNavigationPath* Path = UNavigationSystemV1::FindPathToLocationSynchronously(
+		GetWorld(),
+		PlayerCharacter->GetActorLocation(),
+		Destination);
+
+	// Partial paths are kept on purpose (unlike IsCompleteNavMeshPath, which rejects them): when the
+	// cursor sits on an obstacle or off the navmesh, the player should still walk as close as the
+	// navmesh allows rather than freeze in place the moment the cursor crosses onto an obstacle.
+	if (!Path || !Path->IsValid() || Path->PathPoints.Num() == 0)
+		return;
+
+	HoldSteerPathPoints = Path->PathPoints;
+	// PathPoints[0] is the character's own position: always steer toward a corner ahead of it.
+	HoldSteerPointIndex = HoldSteerPathPoints.Num() > 1 ? 1 : 0;
+}
+
+bool UML_NavigationBridgeComponent::GetNavSteeringDirection(const FVector& Destination, float DeltaTime, FVector& OutDirection)
+{
+	OutDirection = FVector::ZeroVector;
+
+	if (!IsValid(PlayerCharacter))
+		return false;
+
+	// Rebuilding the path every frame would run one synchronous query per tick for nothing: the corners
+	// only change when the cursor moves meaningfully. So refresh on a timer, plus immediately whenever
+	// the cursor jumps, so a big cursor move still redirects the player on the very next frame.
+	constexpr float RefreshInterval = 0.1f;
+	constexpr float DestinationTolerance = 100.f;
+
+	// Tighter than NavMeshAcceptanceRadius on purpose: a corner only counts as passed once the player
+	// is nearly on it, otherwise we would start aiming at the corner AFTER it and cut straight across
+	// the geometry the navmesh was routing us around.
+	constexpr float CornerReachedRadius = 25.f;
+
+	HoldSteerRefreshTimer += DeltaTime;
+
+	const bool bDestinationMoved =
+		FVector::DistSquared2D(Destination, HoldSteerLastDestination) > FMath::Square(DestinationTolerance);
+
+	if (HoldSteerPathPoints.Num() == 0 || bDestinationMoved || HoldSteerRefreshTimer >= RefreshInterval)
+		RefreshHoldSteeringPath(Destination);
+
+	if (HoldSteerPathPoints.Num() == 0)
+		return false;
+
+	// Skip the corners already reached — a tight zig-zag can cross several within one refresh window.
+	const FVector CurrentLocation = PlayerCharacter->GetActorLocation();
+	while (HoldSteerPathPoints.IsValidIndex(HoldSteerPointIndex) &&
+	       FVector::DistSquared2D(CurrentLocation, HoldSteerPathPoints[HoldSteerPointIndex]) <= FMath::Square(CornerReachedRadius))
+	{
+		++HoldSteerPointIndex;
+	}
+
+	// Path fully consumed: destination reached, or a partial path ran out against an obstacle.
+	// Zero direction with a true return means "stay put", so the caller never pushes into the obstacle.
+	if (!HoldSteerPathPoints.IsValidIndex(HoldSteerPointIndex))
+		return true;
+
+	OutDirection = (HoldSteerPathPoints[HoldSteerPointIndex] - CurrentLocation).GetSafeNormal2D();
+	return true;
+}
+
 UPathFollowingComponent* UML_NavigationBridgeComponent::FindPathFollowingComponent() const
 {
 	return IsValid(OwningController) ? OwningController->FindComponentByClass<UPathFollowingComponent>() : nullptr;

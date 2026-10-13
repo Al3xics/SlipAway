@@ -5,6 +5,8 @@
 #include "Engine/Engine.h"
 #include "EngineUtils.h"
 #include "InputAction.h"
+#include "InputMappingContext.h"
+#include "InputModifiers.h"
 #include "EnhancedInputSubsystems.h"
 #include "Actors/ML_CheatTeleportPoint.h"
 #include "Blueprint/UserWidget.h"
@@ -490,11 +492,54 @@ FText UML_CheatSubsystem::ResolveKeyText(const UInputAction* Action) const
 
 	// Only reports keys of the mapping contexts currently mapped - which the cheat IMC is whenever
 	// the overlay is up, so the list always shows the keys that actually work right now.
+	// Short display name on purpose: "&" and "(" rather than "Ampersand" and "Left Parantheses".
 	TArray<FString> KeyNames;
 	for (const FKey& Key : InputSub->QueryKeysMappedToAction(Action))
-		KeyNames.Add(Key.GetDisplayName().ToString());
+		KeyNames.AddUnique(Key.GetDisplayName(false).ToString());
 
 	return FText::FromString(FString::Join(KeyNames, TEXT(" / ")));
+}
+
+TMap<int32, FText> UML_CheatSubsystem::ResolveSlotKeyTexts(const UInputAction* Action) const
+{
+	TMap<int32, FText> SlotKeys;
+
+	const UML_MycelandDeveloperSettings* Settings = GetSettings();
+	if (!Action || !Settings)
+		return SlotKeys;
+
+	int32 Priority = 0;
+	const UInputMappingContext* CheatIMC = Settings->GetInputMappingContext(EInputMappingType::Cheat, Priority);
+	if (!CheatIMC)
+		return SlotKeys;
+
+	// One mapping per key, each carrying the Scalar modifier that turns the press into its slot
+	// number (see the Teleport Slot action in the Dev Settings). Reading that modifier back is the
+	// only way to know which key stands for which slot; a mapping without one feeds the raw axis
+	// value, which is 1.
+	TMap<int32, TArray<FString>> KeyNamesBySlot;
+	for (const FEnhancedActionKeyMapping& Mapping : CheatIMC->GetMappings())
+	{
+		if (Mapping.Action != Action)
+			continue;
+
+		int32 Slot = 1;
+		for (const UInputModifier* Modifier : Mapping.Modifiers)
+		{
+			if (const UInputModifierScalar* Scalar = Cast<UInputModifierScalar>(Modifier))
+			{
+				Slot = FMath::RoundToInt(Scalar->Scalar.X);
+				break;
+			}
+		}
+
+		KeyNamesBySlot.FindOrAdd(Slot).AddUnique(Mapping.Key.GetDisplayName(false).ToString());
+	}
+
+	for (const TPair<int32, TArray<FString>>& Pair : KeyNamesBySlot)
+		SlotKeys.Add(Pair.Key, FText::FromString(FString::Join(Pair.Value, TEXT(" / "))));
+
+	return SlotKeys;
 }
 
 FText UML_CheatSubsystem::FormatSlotKey(const FString& Format, int32 Slot) const
@@ -548,10 +593,14 @@ TArray<FML_CheatEntry> UML_CheatSubsystem::GetTeleportEntries() const
 	if (!Settings)
 		return Entries;
 
+	const TMap<int32, FText> SlotKeys = ResolveSlotKeyTexts(Settings->CheatTeleportSlotAction.LoadSynchronous());
+
 	for (const AML_CheatTeleportPoint* Point : GatherTeleportPoints())
 	{
+		const FText* ResolvedKeys = SlotKeys.Find(Point->Slot);
+
 		FML_CheatEntry Entry;
-		Entry.Keys = FormatSlotKey(Settings->CheatTeleportSlotKeyFormat, Point->Slot);
+		Entry.Keys = ResolvedKeys ? *ResolvedKeys : FormatSlotKey(Settings->CheatTeleportSlotKeyFormat, Point->Slot);
 		Entry.Label = Point->GetDisplayLabel();
 		Entries.Add(MoveTemp(Entry));
 	}
@@ -567,11 +616,15 @@ TArray<FML_CheatEntry> UML_CheatSubsystem::GetLevelEntries() const
 	if (!Settings)
 		return Entries;
 
+	const TMap<int32, FText> SlotKeys = ResolveSlotKeyTexts(Settings->CheatLevelSlotAction.LoadSynchronous());
+
 	const TArray<FGameplayTag> Tags = GetSortedLevelTags();
 	for (int32 Index = 0; Index < Tags.Num(); ++Index)
 	{
+		const FText* ResolvedKeys = SlotKeys.Find(Index + 1);
+
 		FML_CheatEntry Entry;
-		Entry.Keys = FormatSlotKey(Settings->CheatLevelSlotKeyFormat, Index + 1);
+		Entry.Keys = ResolvedKeys ? *ResolvedKeys : FormatSlotKey(Settings->CheatLevelSlotKeyFormat, Index + 1);
 		Entry.Label = FText::FromString(Tags[Index].ToString());
 		Entries.Add(MoveTemp(Entry));
 	}
