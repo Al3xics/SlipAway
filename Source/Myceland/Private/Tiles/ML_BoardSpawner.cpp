@@ -19,6 +19,8 @@
 #include "Subsystem/ML_CinematicSubsystem.h"
 #include "Subsystem/ML_HexGridSubsystem.h"
 #include "Subsystem/ML_WinLoseSubsystem.h"
+#include "Components/ChildActorComponent.h"
+#include "Tiles/ML_TileBase.h"
 
 
 AML_BoardSpawner::AML_BoardSpawner()
@@ -999,24 +1001,94 @@ FName AML_BoardSpawner::GetLevelKey() const
 	return FName(*MapName);
 }
 
+
+void AML_BoardSpawner::ActivateNextWinEffectTile(int32 Index)
+{
+	if (Index >= WinEffectTiles.Num())
+	{
+		return;
+	}
+
+	auto ActivateTileBase = [](AML_Tile* Tile)
+	{
+		if (!IsValid(Tile))
+		{
+			return;
+		}
+
+		TArray<UChildActorComponent*> ChildComponents;
+		Tile->GetComponents<UChildActorComponent>(ChildComponents);
+
+		for (UChildActorComponent* ChildComponent : ChildComponents)
+		{
+			if (!IsValid(ChildComponent))
+			{
+				continue;
+			}
+
+			if (AML_TileBase* TileBase =
+				Cast<AML_TileBase>(ChildComponent->GetChildActor()))
+			{
+				TileBase->SetTileAlive();
+				return;
+			}
+		}
+	};
+
+	if (WinEffectTileDelay <= 0.0f)
+	{
+		for (int32 i = Index; i < WinEffectTiles.Num(); ++i)
+		{
+			ActivateTileBase(WinEffectTiles[i]);
+		}
+
+		return;
+	}
+
+	ActivateTileBase(WinEffectTiles[Index]);
+
+	const int32 NextIndex = Index + 1;
+
+	if (NextIndex < WinEffectTiles.Num())
+	{
+		FTimerDelegate TimerDelegate =
+			FTimerDelegate::CreateUObject(
+				this,
+				&AML_BoardSpawner::ActivateNextWinEffectTile,
+				NextIndex);
+
+		GetWorld()->GetTimerManager().SetTimer(
+			WinEffectTimerHandle,
+			TimerDelegate,
+			WinEffectTileDelay,
+			false);
+	}
+}
+
 void AML_BoardSpawner::HandlePuzzleWon()
 {
-	// Only save for the board that actually triggered the win.
+	// Only process the board that actually triggered the win.
 	if (const UML_WinLoseSubsystem* WinLose = GetWorld()->GetSubsystem<UML_WinLoseSubsystem>())
 	{
 		if (WinLose->CurrentBoardSpawner != this) return;
 	}
 
+	// Start the sequential win effect activation from the beginning.
+	GetWorld()->GetTimerManager().ClearTimer(WinEffectTimerHandle);
+	ActivateNextWinEffectTile(0);
+
+	// Preserve the existing save and board-unlocking behavior.
 	if (!PuzzleID.IsValid()) return;
+
 	UML_SaveSubsystem* SaveSys = GetSaveSubsystem();
 	if (!SaveSys) return;
 
 	SaveSys->MarkPuzzleSolved(PuzzleID.GetTagName(), SnapshotGrid(), GetLevelKey());
 
-	// This board is only now recorded as solved, so run the pass from here rather than from each board's
-	// own win handler: every board sees the new save state, whatever order they were bound in.
+	// Every board now sees the updated solved state.
 	RefreshAllBoardLockStates(GetWorld());
 }
+
 
 void AML_BoardSpawner::DebugAutoWin()
 {

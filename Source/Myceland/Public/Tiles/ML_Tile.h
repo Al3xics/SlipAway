@@ -179,6 +179,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category="Myceland Tile|Collectible")
 	void SetHasCollectible(const bool bNewValue) { bHasCollectible = bNewValue; }
 	
+	UFUNCTION(BlueprintImplementableEvent, BlueprintCallable, Category="Myceland Tile|Feedback", meta=(DisplayName="Set Tile Alive"))
+	void SetTileAlive();
+	
 	UFUNCTION(BlueprintPure, Category="Myceland Tile|Collectible")
 	bool HasCollectible() const { return bHasCollectible; }
 	

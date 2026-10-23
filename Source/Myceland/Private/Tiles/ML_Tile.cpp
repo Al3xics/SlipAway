@@ -166,6 +166,7 @@ void AML_Tile::UpdateClassInEditor(const EML_TileType NewTileType)
 }
 #endif
 
+
 void AML_Tile::UpdateClassAtRuntime(const EML_TileType NewTileType, const TSubclassOf<AML_TileBase> NewClass)
 {
 	if (!NewClass) return;

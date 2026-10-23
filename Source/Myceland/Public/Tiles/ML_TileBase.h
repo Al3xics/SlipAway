@@ -13,6 +13,10 @@ class MYCELAND_API AML_TileBase : public AActor
 
 public:
 	AML_TileBase();
+	UFUNCTION(BlueprintImplementableEvent, BlueprintCallable,
+	Category="Myceland Tile|Feedback",
+	meta=(DisplayName="Set Tile Alive"))
+	void SetTileAlive();
 
 protected:
 	virtual void BeginPlay() override;

@@ -111,7 +111,10 @@ private:
 	// the rule took: a board switched off by a designer, by a win, or by Blueprint is never
 	// re-enabled behind their back.
 	bool bLockedByPrerequisites = false;
+	// Sequential activation of win effect tiles.
+	FTimerHandle WinEffectTimerHandle;
 
+	void ActivateNextWinEffectTile(int32 Index);
 	// Generators
 	void UpdateCurrentGrid(bool bAllowSpawn = true);
 	void SpawnHexagonRadius();
@@ -189,11 +192,21 @@ public:
 	UPROPERTY(EditAnywhere, Category="ML- Hex Grid", meta=(ClampMin="0.01"))
 	FVector TileScale = FVector(2.f, 2.f, 2.f);
 	
+
 	UPROPERTY(EditAnywhere, Category="ML- Hex Grid", meta=(Categories="Puzzle"))
 	FGameplayTag PuzzleID;
 
+	// Actors that should receive Set Tile Alive when this puzzle is won.
+	// Assign the desired tile actors per board instance in the Details panel.
+	UPROPERTY(EditInstanceOnly, BlueprintReadOnly, Category="ML- Win Effects", meta=(DisplayName="Win Effect Tiles"))
+	TArray<TObjectPtr<AML_Tile>> WinEffectTiles;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category="ML- Win Effects", meta=(DisplayName="Win Effect Tile Delay", ClampMin="0.0", UIMin="0.0", Units="Seconds"))
+	float WinEffectTileDelay = 0.2f;
+
 	UPROPERTY(EditAnywhere, Category="ML- Hex Grid")
 	TArray<AML_CameraRail*> AssociatedCameraRails;
+
 
 	UPROPERTY(EditInstanceOnly, Category="ML- Runtime")
 	TArray<AActor*> ExitGrounds;
